@@ -25,9 +25,10 @@ class MissileSimulation:
         self.target_angle = 0.0
         
         # Missile parameters
-        self.missile_pos = np.array([0.0, 0.0, 0.0])  # Launch from origin
+        self.missile_pos = np.array([0.0, 0.0, 50.0])  # Spawn at launch tower
         self.missile_vel = np.array([0.0, 0.0, 0.0])
-        self.missile_active = False
+        self.missile_spawned = True  # Missile is visible
+        self.missile_active = False  # Missile is flying
         self.missile_thrust = 150.0  # m/s² acceleration (typical SAM: 50-150 m/s²)
         self.missile_mass = 85.0  # kg (similar to AIM-9)
         self.missile_fuel = 20.0  # seconds of fuel
@@ -55,10 +56,17 @@ class MissileSimulation:
         self.fin_damping = 0.8  # Stabilization damping coefficient
         self.fin_lift_slope = 3.5  # Less than canards
         
+        # Rollerons (roll control surfaces) - 2 small surfaces on rear fins
+        self.rolleron_area = 0.015  # m² each rolleron (small)
+        self.rolleron_distance = 1.8  # meters from CoG (at fin tips)
+        self.rolleron_damping = 1.5  # Roll damping coefficient
+        self.rolleron_lift_slope = 2.0  # Lift coefficient per radian
+        
         # Missile orientation (quaternion or Euler angles - using body frame)
-        self.missile_pitch = 0.0  # rad
-        self.missile_yaw = 0.0  # rad
-        self.missile_roll = 0.0  # rad
+        # Initial orientation pointing straight up
+        self.missile_pitch = -np.pi / 2.0  # 90 degrees up (vertical)
+        self.missile_yaw = 0.0  # No horizontal rotation
+        self.missile_roll = 0.0  # No roll
         self.angular_velocity = np.array([0.0, 0.0, 0.0])  # rad/s [pitch_rate, yaw_rate, roll_rate]
         self.moment_of_inertia = 2.0  # kg*m² simplified scalar
         
@@ -70,7 +78,7 @@ class MissileSimulation:
         
         # Path history
         self.target_path = [self.target_pos.copy()]
-        self.missile_path = []
+        self.missile_path = [self.missile_pos.copy()]
         
         # Plot elements
         self.target_dot, = self.ax.plot([self.target_pos[0]/1000.0], 
@@ -100,12 +108,12 @@ class MissileSimulation:
         self.ax.set_title('Main View - Press SPACE to launch')
         
         # Setup closeup plot
-        self.ax_closeup.set_xlim(-0.5, 2)
-        self.ax_closeup.set_ylim(-1, 1)
-        self.ax_closeup.set_zlim(-1, 1)
-        self.ax_closeup.set_xlabel('Forward (m)')
-        self.ax_closeup.set_ylabel('Right (m)')
-        self.ax_closeup.set_zlabel('Up (m)')
+        self.ax_closeup.set_xlim(-1.5, 1.5)
+        self.ax_closeup.set_ylim(-1.5, 1.5)
+        self.ax_closeup.set_zlim(-1.5, 1.5)
+        self.ax_closeup.set_xlabel('X (m)')
+        self.ax_closeup.set_ylabel('Y (m)')
+        self.ax_closeup.set_zlabel('Z (m)')
         self.ax_closeup.set_title('Missile Closeup - Control Surfaces')
         
         # Draw boundary cube
@@ -142,12 +150,9 @@ class MissileSimulation:
         self.closeup_aero_fin_bottom, = self.ax_closeup.plot([], [], [], 'orange', linewidth=2, alpha=0.8)
         self.closeup_aero_fin_left, = self.ax_closeup.plot([], [], [], 'orange', linewidth=2, alpha=0.8)
         self.closeup_aero_fin_right, = self.ax_closeup.plot([], [], [], 'orange', linewidth=2, alpha=0.8)
-        # Add dummy lines for legend
-        self.ax_closeup.plot([], [], [], 'r-', linewidth=3, label='Canards')
-        self.ax_closeup.plot([], [], [], 'b-', linewidth=2, label='Rear Fins')
-        self.ax_closeup.plot([], [], [], 'm-', linewidth=2, label='Canard Forces')
-        self.ax_closeup.plot([], [], [], 'orange', linewidth=2, label='Fin Forces')
-        self.ax_closeup.legend(loc='upper right', fontsize=7)
+        # Add dummy lines for legend (moved after orientation axes creation)
+        
+        # Note: Legend items for orientation axes (Forward/Right/Up) will be added automatically from the actual lines
         
         # Closeup info text
         self.closeup_text = self.ax_closeup.text2D(0.02, 0.98, '', transform=self.ax_closeup.transAxes,
@@ -221,23 +226,17 @@ class MissileSimulation:
             self.ax.plot3D(points[:, 0], points[:, 1], points[:, 2], 'k-', alpha=0.2, linewidth=0.5)
     
     def launch_missile(self):
-        """Launch missile from origin"""
-        if not self.missile_active:
-            self.missile_pos = np.array([0.0, 0.0, 50.0])  # Start 50m above ground (launch tower)
-            
+        """Launch missile - start flight"""
+        if not self.missile_active and self.missile_spawned:
             # Start with strong initial upward velocity
             self.missile_vel = np.array([0.0, 0.0, 100.0])  # 100 m/s upward (360 km/h)
             
-            # Initial orientation pointing up toward target
-            to_target = self.target_pos - self.missile_pos
-            dist = np.linalg.norm(to_target[:2])  # horizontal distance
-            self.missile_pitch = np.arctan2(to_target[2], dist)  # angle up
-            self.missile_yaw = np.arctan2(to_target[1], to_target[0])  # angle in XY
+            # Keep current orientation (straight up at start)
+            # Guidance system will rotate it toward target during flight
             self.angular_velocity = np.array([0.0, 0.0, 0.0])
             
             self.missile_active = True
             self.missile_time = 0.0
-            self.missile_path = [self.missile_pos.copy()]
             print(f"MISSILE LAUNCHED! (Sim speed: {self.sim_speed:.1f}x)")
     
     def get_body_axes(self):
@@ -320,6 +319,13 @@ class MissileSimulation:
             # Moment arm from CoG
             moment_arm = forward * self.canard_distance
             total_moment += np.cross(moment_arm, lift)
+            
+            # Canards can also induce roll if deflected asymmetrically
+            # Roll moment from offset lift (top/bottom create roll when asymmetric)
+            if i < 2:  # Top/Bottom canards
+                roll_arm = self.canard_distance * 0.15  # Distance from centerline
+                roll_moment = np.cross(forward * roll_arm, lift)
+                total_moment += roll_moment
         
         # Process 4 individual REAR FINS (stabilizing + optional control)
         # Rear fins primarily provide damping
@@ -357,10 +363,27 @@ class MissileSimulation:
             # Moment arm from CoG (rear, so stabilizing)
             moment_arm = -forward * self.fin_distance
             total_moment += np.cross(moment_arm, lift)
+            
+            # Fins can also induce roll
+            if i < 2:  # Top/Bottom fins
+                roll_arm = self.fin_distance * 0.2  # Distance from centerline
+                roll_moment = np.cross(-forward * roll_arm, lift)
+                total_moment += roll_moment
         
         # Angular velocity damping from fins
         damping_moment = -self.fin_damping * self.angular_velocity
         total_moment += damping_moment
+        
+        # Rolleron damping - specifically targets roll rate
+        # Rollerons provide strong roll damping by deflecting opposite to roll rate
+        roll_rate = self.angular_velocity[2]  # Roll rate (rad/s)
+        if abs(roll_rate) > 0.01:  # Only when rolling
+            # Rolleron force proportional to roll rate and speed
+            rolleron_force_magnitude = q * self.rolleron_lift_slope * abs(roll_rate) * self.rolleron_area
+            # Roll damping torque (opposes roll)
+            roll_damping_torque = -np.sign(roll_rate) * rolleron_force_magnitude * self.rolleron_distance
+            # Apply along forward axis (roll axis)
+            total_moment += forward * roll_damping_torque * self.rolleron_damping
         
         return total_force / self.missile_mass, total_moment / self.moment_of_inertia
     
@@ -421,10 +444,10 @@ class MissileSimulation:
                 
                 # Return [top, bottom, left, right] deflections
                 canard_cmds = np.array([
-                    pitch_cmd,    # top: positive deflects up
-                    -pitch_cmd,   # bottom: opposite for differential
-                    yaw_cmd,      # left: positive deflects left
-                    -yaw_cmd      # right: opposite
+                    0.1,    # top: positive deflects up
+                    -0,   # bottom: opposite for differential
+                    0,      # left: positive deflects left
+                    -0      # right: opposite
                 ])
             else:
                 canard_cmds = np.array([0.0, 0.0, 0.0, 0.0])
@@ -456,6 +479,44 @@ class MissileSimulation:
         if self.missile_active:
             self.missile_time += effective_dt
             
+            # TEST MODE: Override orientation for testing rotation visualization
+            # Comment this block out to return to normal guidance
+            test_mode = True
+            if test_mode and self.missile_time < 15.0:  # First 15 seconds = test sequence
+                t = self.missile_time
+                # Pitch sequence: Start vertical, go horizontal, then nose up
+                if t < 3.0:
+                    self.missile_pitch = -np.pi/2.0 + (t/3.0) * np.pi/2.0  # Vertical to horizontal
+                elif t < 6.0:
+                    self.missile_pitch = 0.0  # Hold horizontal
+                elif t < 9.0:
+                    self.missile_pitch = 0.0 + ((t-6.0)/3.0) * np.pi/4.0  # Pitch up 45 degrees
+                else:
+                    self.missile_pitch = np.pi/4.0  # Hold 45 up
+                
+                # Yaw sequence: Rotate 360 degrees slowly
+                self.missile_yaw = (t / 10.0) * 2.0 * np.pi  # Full rotation every 10 seconds
+                
+                # Roll sequence: Roll back and forth
+                if t < 5.0:
+                    self.missile_roll = 0.0
+                elif t < 8.0:
+                    self.missile_roll = ((t-5.0)/3.0) * np.pi  # Roll 180 degrees
+                elif t < 11.0:
+                    self.missile_roll = np.pi - ((t-8.0)/3.0) * np.pi  # Roll back
+                else:
+                    self.missile_roll = ((t-11.0)/2.0) * np.pi/2.0  # Roll to 90 degrees
+                
+                # Keep missile stationary in test mode
+                self.missile_pos = np.array([0.0, 0.0, 1000.0])  # Hold at 1km altitude
+                self.missile_vel = np.array([0.0, 0.0, 0.0])  # No velocity
+                self.angular_velocity = np.array([0.0, 0.0, 0.0])  # No angular velocity
+                
+                # Skip all physics simulation
+                self.update_display()
+                return
+            # END TEST MODE
+            
             # Calculate guidance command (returns 4 canard deflection angles)
             canard_cmd = self.proportional_navigation()
             
@@ -474,11 +535,18 @@ class MissileSimulation:
             
             # Calculate aerodynamic forces and moments
             aero_accel, angular_accel = self.calculate_aero_forces(speed)
+            angular_accel = np.array(angular_accel)  # Ensure it's mutable
             
             # Apply thrust if fuel available (thrust along body axis)
             if self.missile_time < self.missile_fuel:
                 forward, _, _ = self.get_body_axes()
                 thrust_accel = forward * self.missile_thrust
+                
+                # Add small roll disturbance from thrust asymmetry/turbulence
+                # This simulates real-world imperfections that cause roll
+                if speed > 50.0:  # Only at higher speeds
+                    roll_disturbance = np.random.normal(0, 0.05)  # Small random roll torque
+                    angular_accel[2] += roll_disturbance
             else:
                 thrust_accel = np.array([0.0, 0.0, 0.0])
             
@@ -543,7 +611,7 @@ class MissileSimulation:
             self.target_line.set_3d_properties(path_array[:, 2])
         
         # Missile
-        if self.missile_active or len(self.missile_path) > 0:
+        if self.missile_spawned:
             self.missile_dot.set_data([self.missile_pos[0]/1000.0], [self.missile_pos[1]/1000.0])
             self.missile_dot.set_3d_properties([self.missile_pos[2]/1000.0])
             
@@ -607,8 +675,13 @@ class MissileSimulation:
                 guide_mag = np.linalg.norm(self.debug_guidance_accel)
                 info += f"Guidance: {guide_mag:.1f} m/s²\n"
             info += f"Sim Speed: {self.sim_speed:.2f}x"
+        elif self.missile_spawned:
+            distance = np.linalg.norm(self.target_pos - self.missile_pos) / 1000.0
+            info = f"MISSILE READY\n"
+            info += f"Distance to target: {distance:.2f} km\n\n"
+            info += f"Press SPACE to launch\nPress R to reset\nScroll to change speed\nSim Speed: {self.sim_speed:.2f}x"
         else:
-            info = f"Press SPACE to launch\nPress R to reset\nScroll to change speed\nSim Speed: {self.sim_speed:.2f}x"
+            info = f"Press SPACE to spawn\nScroll to change speed\nSim Speed: {self.sim_speed:.2f}x"
         
         self.info_text.set_text(info)
         
@@ -642,10 +715,52 @@ class MissileSimulation:
             rotated_faces.append(rotated_face)
         return rotated_faces
     
+    def get_rotation_matrix(self):
+        """Get rotation matrix for missile orientation (pitch, yaw, roll)"""
+        # Rotation around Z-axis (yaw)
+        cos_yaw, sin_yaw = np.cos(self.missile_yaw), np.sin(self.missile_yaw)
+        R_yaw = np.array([
+            [cos_yaw, -sin_yaw, 0],
+            [sin_yaw, cos_yaw, 0],
+            [0, 0, 1]
+        ])
+        
+        # Rotation around Y-axis (pitch)
+        cos_pitch, sin_pitch = np.cos(self.missile_pitch), np.sin(self.missile_pitch)
+        R_pitch = np.array([
+            [cos_pitch, 0, sin_pitch],
+            [0, 1, 0],
+            [-sin_pitch, 0, cos_pitch]
+        ])
+        
+        # Rotation around X-axis (roll)
+        cos_roll, sin_roll = np.cos(self.missile_roll), np.sin(self.missile_roll)
+        R_roll = np.array([
+            [1, 0, 0],
+            [0, cos_roll, -sin_roll],
+            [0, sin_roll, cos_roll]
+        ])
+        
+        # Combined rotation: first roll, then pitch, then yaw
+        return R_yaw @ R_pitch @ R_roll
+    
+    def transform_mesh_to_world(self, faces):
+        """Transform mesh from body frame to world frame showing missile orientation"""
+        R = self.get_rotation_matrix()
+        transformed_faces = []
+        for face in faces:
+            transformed_face = []
+            for vertex in face:
+                v = np.array(vertex)
+                v_transformed = R @ v
+                transformed_face.append(v_transformed)
+            transformed_faces.append(transformed_face)
+        return transformed_faces
+    
     def update_closeup(self):
         """Update the closeup view showing missile control surfaces"""
-        if not self.missile_active:
-            # Clear closeup when not active
+        if not self.missile_spawned:
+            # Clear closeup when not spawned
             self.closeup_body.set_segments([])
             self.closeup_canard_top.set_verts([])
             self.closeup_canard_bottom.set_verts([])
@@ -670,16 +785,18 @@ class MissileSimulation:
         # Get body axes
         forward, right, up = self.get_body_axes()
         
-        # Draw body from OBJ as wireframe (edges only)
+        # Draw body from OBJ as wireframe (edges only) with rotation applied
         if 'Body' in self.obj_data:
+            # Transform body to show missile orientation
+            transformed_body = self.transform_mesh_to_world(self.obj_data['Body'])
             edges = []
-            for face in self.obj_data['Body']:
+            for face in transformed_body:
                 # Create edges from face vertices
                 for i in range(len(face)):
                     edges.append([face[i], face[(i + 1) % len(face)]])
             self.closeup_body.set_segments(edges)
         
-        # Canards from OBJ with rotation
+        # Canards from OBJ with rotation (deflection + missile orientation)
         # Top/Down rotate around Z-axis, Left/Right rotate around Y-axis
         canard_objects = [
             ('Can_TOP', self.closeup_canard_top, self.canard_deflection[0], 'z'),
@@ -690,10 +807,13 @@ class MissileSimulation:
         
         for obj_name, poly, angle, axis in canard_objects:
             if obj_name in self.obj_data and obj_name in self.obj_centers:
+                # First apply canard deflection
                 rotated_faces = self.rotate_mesh(self.obj_data[obj_name], angle, axis, self.obj_centers[obj_name])
-                poly.set_verts(rotated_faces)
+                # Then apply missile orientation
+                transformed_faces = self.transform_mesh_to_world(rotated_faces)
+                poly.set_verts(transformed_faces)
         
-        # Rear fins from OBJ with rotation
+        # Rear fins from OBJ with rotation (deflection + missile orientation)
         # Top/Down rotate around Z-axis, Left/Right rotate around Y-axis
         fin_objects = [
             ('Stab_TOP', self.closeup_fin_top, self.fin_deflection[0], 'z'),
@@ -704,8 +824,11 @@ class MissileSimulation:
         
         for obj_name, poly, angle, axis in fin_objects:
             if obj_name in self.obj_data and obj_name in self.obj_centers:
+                # First apply fin deflection
                 rotated_faces = self.rotate_mesh(self.obj_data[obj_name], angle, axis, self.obj_centers[obj_name])
-                poly.set_verts(rotated_faces)
+                # Then apply missile orientation
+                transformed_faces = self.transform_mesh_to_world(rotated_faces)
+                poly.set_verts(transformed_faces)
         
         # Velocity arrow (relative to body frame)
         speed = np.linalg.norm(self.missile_vel)
@@ -722,12 +845,15 @@ class MissileSimulation:
             self.closeup_velocity_arrow.set_data([0, vel_arrow_end[0]], [0, vel_arrow_end[1]])
             self.closeup_velocity_arrow.set_3d_properties([0, vel_arrow_end[2]])
         
-        # Draw aero force vectors (along surface normal)
+        # Draw aero force vectors (along surface normal) - transformed with missile rotation
         force_scale = 0.002  # Scale forces for visibility
         canard_aero_lines = [self.closeup_aero_canard_top, self.closeup_aero_canard_bottom,
                             self.closeup_aero_canard_left, self.closeup_aero_canard_right]
         fin_aero_lines = [self.closeup_aero_fin_top, self.closeup_aero_fin_bottom,
                          self.closeup_aero_fin_left, self.closeup_aero_fin_right]
+        
+        # Get rotation matrix for transforming force vectors
+        R = self.get_rotation_matrix()
         
         # Canard force vectors (from center of canard surface, along actual surface normal)
         if hasattr(self, 'canard_forces') and len(self.canard_forces) == 4 and hasattr(self, 'obj_centers'):
@@ -737,7 +863,7 @@ class MissileSimulation:
                 obj_name = ['Can_TOP', 'Can_DOWN', 'Can_LEFT', 'Can_RIGHT'][i]
                 if obj_name in self.obj_centers and np.linalg.norm(force) > 0.1:
                     # Use center of canard surface as application point
-                    center = self.obj_centers[obj_name]
+                    center = np.array(self.obj_centers[obj_name])
                     angle = self.canard_deflection[i]
                     
                     # Calculate actual surface normal based on deflection
@@ -759,9 +885,13 @@ class MissileSimulation:
                     # Project force onto surface normal
                     force_along_normal = np.dot(force, normal) * normal
                     
+                    # Apply missile rotation to both center and end points
+                    center_transformed = R @ center
                     end = center + force_along_normal * force_scale
-                    line.set_data([center[0], end[0]], [center[1], end[1]])
-                    line.set_3d_properties([center[2], end[2]])
+                    end_transformed = R @ end
+                    
+                    line.set_data([center_transformed[0], end_transformed[0]], [center_transformed[1], end_transformed[1]])
+                    line.set_3d_properties([center_transformed[2], end_transformed[2]])
                 else:
                     line.set_data([], [])
                     line.set_3d_properties([])
@@ -772,7 +902,7 @@ class MissileSimulation:
                 obj_name = ['Stab_TOP', 'Stab_DOWN', 'Stab_LEFT', 'Stab_RIGHT'][i]
                 if obj_name in self.obj_centers and np.linalg.norm(force) > 0.1:
                     # Use center of fin surface as application point
-                    center = self.obj_centers[obj_name]
+                    center = np.array(self.obj_centers[obj_name])
                     angle = self.fin_deflection[i]
                     
                     # Calculate actual surface normal based on deflection
@@ -792,15 +922,23 @@ class MissileSimulation:
                     # Project force onto surface normal
                     force_along_normal = np.dot(force, normal) * normal
                     
+                    # Apply missile rotation to both center and end points
+                    center_transformed = R @ center
                     end = center + force_along_normal * force_scale
-                    line.set_data([center[0], end[0]], [center[1], end[1]])
-                    line.set_3d_properties([center[2], end[2]])
+                    end_transformed = R @ end
+                    
+                    line.set_data([center_transformed[0], end_transformed[0]], [center_transformed[1], end_transformed[1]])
+                    line.set_3d_properties([center_transformed[2], end_transformed[2]])
                 else:
                     line.set_data([], [])
                     line.set_3d_properties([])
         
         # Closeup info text
-        info = "CANARDS (front)\n"
+        info = "ORIENTATION:\n"
+        info += f"Pitch: {np.degrees(self.missile_pitch):+.1f}°\n"
+        info += f"Yaw:   {np.degrees(self.missile_yaw):+.1f}°\n"
+        info += f"Roll:  {np.degrees(self.missile_roll):+.1f}°\n\n"
+        info += "CANARDS (front)\n"
         info += f"Top:    {np.degrees(self.canard_deflection[0]):+.1f}°"
         if abs(self.canard_deflection[0]) > self.canard_stall_angle:
             info += " STALL"
@@ -821,22 +959,28 @@ class MissileSimulation:
         info += f"B:{np.degrees(self.fin_deflection[1]):+.0f}° "
         info += f"L:{np.degrees(self.fin_deflection[2]):+.0f}° "
         info += f"R:{np.degrees(self.fin_deflection[3]):+.0f}°\n"
-        info += "\nAngular vel:\n"
-        info += f"  P: {np.degrees(self.angular_velocity[0]):+.1f}°/s\n"
-        info += f"  Y: {np.degrees(self.angular_velocity[1]):+.1f}°/s\n"
-        info += f"  R: {np.degrees(self.angular_velocity[2]):+.1f}°/s"
+        info += f"\nAngular vel:\n"
+        info += f"  Pitch: {np.degrees(self.angular_velocity[0]):+.1f}°/s\n"
+        info += f"  Yaw:   {np.degrees(self.angular_velocity[1]):+.1f}°/s\n"
+        info += f"  Roll:  {np.degrees(self.angular_velocity[2]):+.1f}°/s"
         
         self.closeup_text.set_text(info)
     
     def reset(self):
         """Reset simulation"""
         self.missile_active = False
-        self.missile_pos = np.array([0.0, 0.0, 0.0])
+        self.missile_spawned = True
+        self.missile_pos = np.array([0.0, 0.0, 50.0])
         self.missile_vel = np.array([0.0, 0.0, 0.0])
         self.missile_time = 0.0
-        self.missile_path = []
-        self.missile_line.set_data([], [])
-        self.missile_line.set_3d_properties([])
+        
+        # Reset orientation to point straight up
+        self.missile_pitch = -np.pi / 2.0  # 90 degrees up
+        self.missile_yaw = 0.0
+        self.missile_roll = 0.0
+        self.angular_velocity = np.array([0.0, 0.0, 0.0])
+        
+        self.missile_path = [self.missile_pos.copy()]
         print("SIMULATION RESET")
     
     def on_scroll(self, event):
@@ -850,7 +994,19 @@ class MissileSimulation:
     def on_key(self, event):
         """Keyboard controls"""
         if event.key == ' ':
-            self.launch_missile()
+            if not self.missile_spawned:
+                # Spawn missile
+                self.missile_spawned = True
+                self.missile_pos = np.array([0.0, 0.0, 50.0])
+                self.missile_vel = np.array([0.0, 0.0, 0.0])
+                self.missile_pitch = -np.pi / 2.0  # Point straight up
+                self.missile_yaw = 0.0
+                self.missile_roll = 0.0
+                self.missile_path = [self.missile_pos.copy()]
+                print("MISSILE SPAWNED - Press SPACE again to launch")
+            else:
+                # Launch missile
+                self.launch_missile()
         elif event.key == 'r':
             self.reset()
         elif event.key == '+':
@@ -874,6 +1030,7 @@ class MissileSimulation:
         print(f"  Body Drag Coeff: {self.body_drag_coeff}")
         print(f"  Canard Area: {self.canard_area} m² (max deflection: {np.degrees(self.canard_max_deflection):.0f}°)")
         print(f"  Fin Area: {self.fin_area} m²")
+        print(f"  Rolleron Area: {self.rolleron_area} m² (roll damping)")
         print(f"  Canard Stall Angle: {np.degrees(self.canard_stall_angle):.0f}°")
         print(f"  Guidance: Proportional Navigation (N={self.guidance_gain})")
         print("\nControls:")
@@ -883,6 +1040,7 @@ class MissileSimulation:
         print("\nPhysics:")
         print(f"  Time step: {self.dt} s")
         print(f"  Gravity: {abs(self.gravity[2]):.2f} m/s²")
+        print(f"  Roll Damping: Active (Rollerons)")
         print("=" * 50)
         plt.show()
 
