@@ -63,8 +63,8 @@ class MissileSimulation:
         self.rolleron_lift_slope = 2.0  # Lift coefficient per radian
         
         # Missile orientation (quaternion or Euler angles - using body frame)
-        # Initial orientation pointing straight up
-        self.missile_pitch = -np.pi / 2.0  # 90 degrees up (vertical)
+        # Initial orientation pointing straight up (pitch = -pi/2 yields forward +Z after axis fix)
+        self.missile_pitch = -np.pi / 2.0
         self.missile_yaw = 0.0  # No horizontal rotation
         self.missile_roll = 0.0  # No roll
         self.angular_velocity = np.array([0.0, 0.0, 0.0])  # rad/s [pitch_rate, yaw_rate, roll_rate]
@@ -166,6 +166,9 @@ class MissileSimulation:
         self.animation_timer = self.fig.canvas.new_timer(interval=int(self.dt * 1000))
         self.animation_timer.add_callback(self.update)
         self.animation_timer.start()
+        # Performance helpers
+        self.frame_count = 0
+        self.closeup_update_interval = 3  # update closeup every N frames
     
     def load_obj_model(self, filepath):
         """Load OBJ file and parse mesh data by object name"""
@@ -228,13 +231,8 @@ class MissileSimulation:
     def launch_missile(self):
         """Launch missile - start flight"""
         if not self.missile_active and self.missile_spawned:
-            # Start with strong initial upward velocity
-            self.missile_vel = np.array([0.0, 0.0, 100.0])  # 100 m/s upward (360 km/h)
-            
-            # Keep current orientation (straight up at start)
-            # Guidance system will rotate it toward target during flight
+            self.missile_vel = np.array([0.0, 0.0, 100.0])  # Initial upward velocity
             self.angular_velocity = np.array([0.0, 0.0, 0.0])
-            
             self.missile_active = True
             self.missile_time = 0.0
             print(f"MISSILE LAUNCHED! (Sim speed: {self.sim_speed:.1f}x)")
@@ -242,10 +240,11 @@ class MissileSimulation:
     def get_body_axes(self):
         """Get missile body axes based on current orientation"""
         # Forward (x-axis in body frame)
+        # Define forward so pitch = -pi/2 points along +Z (upward)
         forward = np.array([
             np.cos(self.missile_yaw) * np.cos(self.missile_pitch),
             np.sin(self.missile_yaw) * np.cos(self.missile_pitch),
-            np.sin(self.missile_pitch)
+            -np.sin(self.missile_pitch)
         ])
         
         # Right (y-axis in body frame)
@@ -268,127 +267,80 @@ class MissileSimulation:
         forward, right, up = self.get_body_axes()
         vel_dir = self.missile_vel / speed
         
-        # Air density (simplified, sea level)
-        rho = 1.225  # kg/m³
-        q = 0.5 * rho * speed * speed  # dynamic pressure
+        rho = 1.225  # Air density kg/m³
+        q = 0.5 * rho * speed * speed  # Dynamic pressure
         
-        # Body drag
-        body_drag = -q * self.body_drag_coeff * self.body_area * vel_dir
-        
-        # Angle of attack (angle between velocity and body axis)
-        alpha = np.arccos(np.clip(np.dot(vel_dir, forward), -1, 1))
-        
-        total_force = body_drag.copy()
+        total_force = np.array([0.0, 0.0, 0.0])
         total_moment = np.array([0.0, 0.0, 0.0])
         
-        # Process 4 individual CANARDS (front control surfaces)
-        # Index: 0=top, 1=bottom, 2=left, 3=right
-        canard_positions = [
-            up,      # top canard normal direction
-            -up,     # bottom
-            right,   # left
-            -right   # right
-        ]
-        
-        # Store forces for visualization
+        # CANARDS: [top, bottom, left, right]
+        # Normal directions in body frame
+        canard_normals = [up, -up, right, -right]
         self.canard_forces = []
         
-        for i, normal in enumerate(canard_positions):
+        for i, normal in enumerate(canard_normals):
             deflection = self.canard_deflection[i]
             
-            # Effective angle of attack for this canard
-            local_aoa = alpha + deflection
+            # AoA is simply the deflection angle (angle between surface and airflow)
+            local_aoa = deflection
             
-            # Check for stall
+            # Calculate lift coefficient with stall
             if abs(local_aoa) < self.canard_stall_angle:
                 Cl = self.canard_lift_slope * local_aoa
             else:
-                # Stalled - reduced lift
                 Cl = self.canard_lift_slope * self.canard_stall_angle * np.sign(local_aoa) * 0.5
             
-            # Lift perpendicular to surface
+            # Force perpendicular to surface (along normal)
             lift = q * Cl * self.canard_area * normal
-            # Induced drag
-            drag = q * 0.1 * self.canard_area * abs(deflection) * vel_dir
             
-            net_force = lift - drag
-            total_force += net_force
-            # Store for visualization
-            self.canard_forces.append(net_force)
+            total_force += lift
+            self.canard_forces.append(lift)
             
             # Moment arm from CoG
             moment_arm = forward * self.canard_distance
             total_moment += np.cross(moment_arm, lift)
             
-            # Canards can also induce roll if deflected asymmetrically
-            # Roll moment from offset lift (top/bottom create roll when asymmetric)
-            if i < 2:  # Top/Bottom canards
-                roll_arm = self.canard_distance * 0.15  # Distance from centerline
+            if i < 2:  # Roll moment for top/bottom canards
+                roll_arm = self.canard_distance * 0.15
                 roll_moment = np.cross(forward * roll_arm, lift)
                 total_moment += roll_moment
         
-        # Process 4 individual REAR FINS (stabilizing + optional control)
-        # Rear fins primarily provide damping
-        fin_positions = [
-            up,      # top fin
-            -up,     # bottom
-            right,   # left
-            -right   # right
-        ]
-        
-        # Store forces for visualization
+        # REAR FINS: [top, bottom, left, right]
+        # Normal directions in body frame
+        fin_normals = [up, -up, right, -right]
         self.fin_forces = []
         
-        for i, normal in enumerate(fin_positions):
+        for i, normal in enumerate(fin_normals):
             deflection = self.fin_deflection[i]
             
-            # Rear fins have smaller effect
+            # AoA is simply the deflection angle
             local_aoa = deflection
             
-            # Check for stall
+            # Calculate lift coefficient with stall
             if abs(local_aoa) < self.canard_stall_angle:
                 Cl = self.fin_lift_slope * local_aoa
             else:
                 Cl = self.fin_lift_slope * self.canard_stall_angle * np.sign(local_aoa) * 0.5
             
-            # Lift and drag
+            # Force perpendicular to surface (along normal)
             lift = q * Cl * self.fin_area * normal
-            drag = q * 0.08 * self.fin_area * abs(deflection) * vel_dir
             
-            net_force = lift - drag
-            total_force += net_force
-            # Store for visualization
-            self.fin_forces.append(net_force)
+            total_force += lift
+            self.fin_forces.append(lift)
             
-            # Moment arm from CoG (rear, so stabilizing)
+            # Moment arm from CoG (rear fins)
             moment_arm = -forward * self.fin_distance
             total_moment += np.cross(moment_arm, lift)
             
-            # Fins can also induce roll
-            if i < 2:  # Top/Bottom fins
-                roll_arm = self.fin_distance * 0.2  # Distance from centerline
+            if i < 2:  # Roll moment for top/bottom fins
+                roll_arm = self.fin_distance * 0.2
                 roll_moment = np.cross(-forward * roll_arm, lift)
                 total_moment += roll_moment
         
-        # Angular velocity damping from fins
-        damping_moment = -self.fin_damping * self.angular_velocity
-        total_moment += damping_moment
-        
-        # Rolleron damping - specifically targets roll rate
-        # Rollerons provide strong roll damping by deflecting opposite to roll rate
-        roll_rate = self.angular_velocity[2]  # Roll rate (rad/s)
-        if abs(roll_rate) > 0.01:  # Only when rolling
-            # Rolleron force proportional to roll rate and speed
-            rolleron_force_magnitude = q * self.rolleron_lift_slope * abs(roll_rate) * self.rolleron_area
-            # Roll damping torque (opposes roll)
-            roll_damping_torque = -np.sign(roll_rate) * rolleron_force_magnitude * self.rolleron_distance
-            # Apply along forward axis (roll axis)
-            total_moment += forward * roll_damping_torque * self.rolleron_damping
-        
         return total_force / self.missile_mass, total_moment / self.moment_of_inertia
     
-    def proportional_navigation(self):
-        """Proportional Navigation guidance law - returns desired deflection angles"""
+    def guidance_law(self):
+        """Guidance law - returns desired canard deflection angles [top, bottom, left, right]"""
         # Vector from missile to target
         r = self.target_pos - self.missile_pos
         distance = np.linalg.norm(r)
@@ -397,64 +349,30 @@ class MissileSimulation:
         self.debug_los_vector = r
         self.debug_distance = distance
         
-        if distance < 50.0:  # Hit detection (50m)
+        # Hit detection
+        if distance < 50.0:
             print(f"HIT! Distance: {distance:.1f}m")
             self.missile_active = False
-            return np.array([0.0, 0.0])
+            return np.array([0.0, 0.0, 0.0, 0.0])
         
-        if distance > 0:
-            forward, right, up = self.get_body_axes()
-            
-            # Line-of-sight (LOS) unit vector
-            los = r / distance
-            
-            # Relative velocity
-            v_rel = self.target_vel - self.missile_vel
-            
-            # LOS rate (rotation rate of line-of-sight)
-            los_rate = np.cross(r, v_rel) / (distance * distance)
-            
-            # Proportional navigation: a_cmd = N * v_closing * ω
-            v_closing = -np.dot(v_rel, los)  # Closing velocity
-            
-            # Desired acceleration perpendicular to LOS
-            a_cmd = self.guidance_gain * v_closing * np.cross(los, np.cross(los_rate, los))
-            
-            # Store debug info
-            self.debug_v_closing = v_closing
-            self.debug_los_rate = los_rate
-            self.debug_guidance_accel = a_cmd
-            
-            # Convert desired acceleration to canard deflection angles
-            # Pitch: component along up axis
-            pitch_accel = np.dot(a_cmd, up)
-            # Yaw: component along right axis
-            yaw_accel = np.dot(a_cmd, right)
-            
-            # Simple proportional control: deflection proportional to desired acceleration
-            speed = np.linalg.norm(self.missile_vel)
-            if speed > 10.0:
-                # Gain depends on dynamic pressure (lower at higher speeds)
-                gain = 0.01 / (speed * 0.01)
-                
-                # Differential control: top/bottom for pitch, left/right for yaw
-                # Positive pitch (up) = top deflects up, bottom deflects down
-                pitch_cmd = np.clip(pitch_accel * gain, -self.canard_max_deflection, self.canard_max_deflection)
-                yaw_cmd = np.clip(yaw_accel * gain, -self.canard_max_deflection, self.canard_max_deflection)
-                
-                # Return [top, bottom, left, right] deflections
-                canard_cmds = np.array([
-                    0.1,    # top: positive deflects up
-                    -0,   # bottom: opposite for differential
-                    0,      # left: positive deflects left
-                    -0      # right: opposite
-                ])
-            else:
-                canard_cmds = np.array([0.0, 0.0, 0.0, 0.0])
-            
-            return canard_cmds
+        # Get missile orientation axes
+        forward, right, up = self.get_body_axes()
         
-        return np.array([0.0, 0.0, 0.0, 0.0])
+        # Get relative velocity
+        v_rel = self.target_vel - self.missile_vel
+        
+        
+        
+        # ==========================================
+        # Convert acceleration command to canard deflections
+        # ==========================================
+        # Differential control: top/bottom for pitch, left/right for yaw
+        # Positive pitch (up) = top deflects positive, bottom deflects negative
+        # Positive yaw (right) = left deflects positive, right deflects negative
+        
+        canard_cmds = np.array([0.0, 0.0, 0.0, 0.01])  # [top, bottom, left, right]
+        
+        return canard_cmds
     
     def update(self):
         """Update simulation"""
@@ -479,46 +397,8 @@ class MissileSimulation:
         if self.missile_active:
             self.missile_time += effective_dt
             
-            # TEST MODE: Override orientation for testing rotation visualization
-            # Comment this block out to return to normal guidance
-            test_mode = True
-            if test_mode and self.missile_time < 15.0:  # First 15 seconds = test sequence
-                t = self.missile_time
-                # Pitch sequence: Start vertical, go horizontal, then nose up
-                if t < 3.0:
-                    self.missile_pitch = -np.pi/2.0 + (t/3.0) * np.pi/2.0  # Vertical to horizontal
-                elif t < 6.0:
-                    self.missile_pitch = 0.0  # Hold horizontal
-                elif t < 9.0:
-                    self.missile_pitch = 0.0 + ((t-6.0)/3.0) * np.pi/4.0  # Pitch up 45 degrees
-                else:
-                    self.missile_pitch = np.pi/4.0  # Hold 45 up
-                
-                # Yaw sequence: Rotate 360 degrees slowly
-                self.missile_yaw = (t / 10.0) * 2.0 * np.pi  # Full rotation every 10 seconds
-                
-                # Roll sequence: Roll back and forth
-                if t < 5.0:
-                    self.missile_roll = 0.0
-                elif t < 8.0:
-                    self.missile_roll = ((t-5.0)/3.0) * np.pi  # Roll 180 degrees
-                elif t < 11.0:
-                    self.missile_roll = np.pi - ((t-8.0)/3.0) * np.pi  # Roll back
-                else:
-                    self.missile_roll = ((t-11.0)/2.0) * np.pi/2.0  # Roll to 90 degrees
-                
-                # Keep missile stationary in test mode
-                self.missile_pos = np.array([0.0, 0.0, 1000.0])  # Hold at 1km altitude
-                self.missile_vel = np.array([0.0, 0.0, 0.0])  # No velocity
-                self.angular_velocity = np.array([0.0, 0.0, 0.0])  # No angular velocity
-                
-                # Skip all physics simulation
-                self.update_display()
-                return
-            # END TEST MODE
-            
             # Calculate guidance command (returns 4 canard deflection angles)
-            canard_cmd = self.proportional_navigation()
+            canard_cmd = self.guidance_law()
             
             # Smooth canard deflection (rate limit for each)
             max_deflection_rate = np.radians(180) * effective_dt  # 180 deg/s max rate
@@ -545,7 +425,7 @@ class MissileSimulation:
                 # Add small roll disturbance from thrust asymmetry/turbulence
                 # This simulates real-world imperfections that cause roll
                 if speed > 50.0:  # Only at higher speeds
-                    roll_disturbance = np.random.normal(0, 0.05)  # Small random roll torque
+                    roll_disturbance = np.random.normal(0, 0.005)  # Small random roll torque
                     angular_accel[2] += roll_disturbance
             else:
                 thrust_accel = np.array([0.0, 0.0, 0.0])
@@ -595,6 +475,8 @@ class MissileSimulation:
                 print("MISSILE OUT OF BOUNDS")
             
             self.missile_path.append(self.missile_pos.copy())
+            if len(self.missile_path) > 500:
+                self.missile_path.pop(0)
         
         # Update display
         self.update_display()
@@ -685,8 +567,10 @@ class MissileSimulation:
         
         self.info_text.set_text(info)
         
-        # Update closeup view
-        self.update_closeup()
+        # Throttle expensive closeup 3D mesh updates
+        self.frame_count += 1
+        if self.frame_count % self.closeup_update_interval == 0:
+            self.update_closeup()
         
         self.fig.canvas.draw_idle()
     
