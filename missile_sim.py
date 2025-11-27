@@ -1,19 +1,32 @@
 import numpy as np
+import matplotlib
+matplotlib.use('Qt5Agg')  # Use Qt backend for better performance
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
+# Performance optimizations for matplotlib
+plt.rcParams['path.simplify'] = True
+plt.rcParams['path.simplify_threshold'] = 1.0
+plt.rcParams['agg.path.chunksize'] = 10000
+
 class MissileSimulation:
     def __init__(self):
-        self.fig = plt.figure(figsize=(18, 10))
+        self.fig = plt.figure(figsize=(12, 10))
+        self.fig.canvas.manager.set_window_title('Missile Simulation - Performance Mode')
         
-        # Create two subplots: main view and closeup view
-        self.ax = self.fig.add_subplot(121, projection='3d')
-        self.ax_closeup = self.fig.add_subplot(122, projection='3d')
+        # Single plot for maximum performance
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        
+        # Disable auto-scaling for performance
+        self.ax.set_autoscale_on(False)
+        
+        # Disable closeup view for performance
+        self.closeup_enabled = False
         
         # Physics parameters (SI units)
         self.bounds = 10000.0  # Cube boundary (10 km)
         self.gravity = np.array([0.0, 0.0, -9.81])  # Gravity (m/s²)
-        self.dt = 0.05  # Time step (50ms for smoother animation)
+        self.dt = 0.05  # Time step (20 FPS - optimal for matplotlib 3D)
         
         # Target (aircraft flying in circle)
         self.target_pos = np.array([5000.0, 0.0, 5000.0])
@@ -80,21 +93,29 @@ class MissileSimulation:
         self.target_path = [self.target_pos.copy()]
         self.missile_path = [self.missile_pos.copy()]
         
-        # Plot elements
+        # Plot elements (with antialiasing disabled for performance)
         self.target_dot, = self.ax.plot([self.target_pos[0]/1000.0], 
                                         [self.target_pos[1]/1000.0], 
                                         [self.target_pos[2]/1000.0], 
-                                        'bo', markersize=10, label='Target (700 km/h)')
+                                        'bo', markersize=10, label='Target (700 km/h)', 
+                                        antialiased=False)
         
-        self.missile_dot, = self.ax.plot([], [], [], 'ro', markersize=8, label='Missile')
-        self.target_line, = self.ax.plot([], [], [], 'b-', linewidth=1.5, alpha=0.5)
-        self.missile_line, = self.ax.plot([], [], [], 'r-', linewidth=2, alpha=0.7)
+        self.missile_dot, = self.ax.plot([], [], [], 'ro', markersize=8, label='Missile', 
+                                         antialiased=False)
+        self.target_line, = self.ax.plot([], [], [], 'b-', linewidth=1.5, alpha=0.5, 
+                                         antialiased=False)
+        self.missile_line, = self.ax.plot([], [], [], 'r-', linewidth=2, alpha=0.7, 
+                                          antialiased=False)
         
-        # Debug visualization lines
-        self.los_line, = self.ax.plot([], [], [], 'g--', linewidth=2, alpha=0.7, label='Line of Sight')
-        self.missile_vel_line, = self.ax.plot([], [], [], 'r-', linewidth=2, alpha=0.8)
-        self.target_vel_line, = self.ax.plot([], [], [], 'b-', linewidth=2, alpha=0.8)
-        self.guidance_vec_line, = self.ax.plot([], [], [], 'y-', linewidth=3, alpha=0.9, label='Guidance')
+        # Debug visualization lines (antialiasing disabled)
+        self.los_line, = self.ax.plot([], [], [], 'g--', linewidth=2, alpha=0.7, 
+                                       label='Line of Sight', antialiased=False)
+        self.missile_vel_line, = self.ax.plot([], [], [], 'r-', linewidth=2, alpha=0.8, 
+                                               antialiased=False)
+        self.target_vel_line, = self.ax.plot([], [], [], 'b-', linewidth=2, alpha=0.8, 
+                                              antialiased=False)
+        self.guidance_vec_line, = self.ax.plot([], [], [], 'y-', linewidth=3, alpha=0.9, 
+                                                label='Guidance', antialiased=False)
         
         # Setup main plot
         bounds_km = self.bounds / 1000.0
@@ -107,14 +128,12 @@ class MissileSimulation:
         self.ax.legend(loc='upper left', fontsize=8)
         self.ax.set_title('Main View - Press SPACE to launch')
         
-        # Setup closeup plot
-        self.ax_closeup.set_xlim(-1.5, 1.5)
-        self.ax_closeup.set_ylim(-1.5, 1.5)
-        self.ax_closeup.set_zlim(-1.5, 1.5)
-        self.ax_closeup.set_xlabel('X (m)')
-        self.ax_closeup.set_ylabel('Y (m)')
-        self.ax_closeup.set_zlabel('Z (m)')
-        self.ax_closeup.set_title('Missile Closeup - Control Surfaces')
+        # Reduce grid density for performance
+        self.ax.xaxis.set_major_locator(plt.MaxNLocator(5))
+        self.ax.yaxis.set_major_locator(plt.MaxNLocator(5))
+        self.ax.zaxis.set_major_locator(plt.MaxNLocator(5))
+        
+        # Closeup view disabled for performance
         
         # Draw boundary cube
         self.draw_boundary_cube()
@@ -123,54 +142,30 @@ class MissileSimulation:
         self.info_text = self.ax.text2D(0.02, 0.98, '', transform=self.ax.transAxes, 
                                        verticalalignment='top', fontfamily='monospace', fontsize=9)
         
-        # Load OBJ model
-        from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
-        self.obj_data = self.load_obj_model('quit.obj')
-        
-        # Closeup view elements (missile body and control surfaces from OBJ)
-        # Wireframe rendering (edges only, no faces)
-        # Initialize with dummy segment to avoid auto_scale_xyz error with empty collection
-        self.closeup_body = Line3DCollection([[[0,0,0],[0,0,0]]], colors='black', linewidths=1.5)
-        self.ax_closeup.add_collection3d(self.closeup_body)
-        # 4 individual canards (front)
-        self.closeup_canard_top = self.ax_closeup.add_collection3d(Poly3DCollection([], facecolors='red', edgecolors='darkred', alpha=0.8, linewidths=1))
-        self.closeup_canard_bottom = self.ax_closeup.add_collection3d(Poly3DCollection([], facecolors='red', edgecolors='darkred', alpha=0.8, linewidths=1))
-        self.closeup_canard_left = self.ax_closeup.add_collection3d(Poly3DCollection([], facecolors='red', edgecolors='darkred', alpha=0.8, linewidths=1))
-        self.closeup_canard_right = self.ax_closeup.add_collection3d(Poly3DCollection([], facecolors='red', edgecolors='darkred', alpha=0.8, linewidths=1))
-        # 4 individual rear fins
-        self.closeup_fin_top = self.ax_closeup.add_collection3d(Poly3DCollection([], facecolors='blue', edgecolors='darkblue', alpha=0.8, linewidths=1))
-        self.closeup_fin_bottom = self.ax_closeup.add_collection3d(Poly3DCollection([], facecolors='blue', edgecolors='darkblue', alpha=0.8, linewidths=1))
-        self.closeup_fin_left = self.ax_closeup.add_collection3d(Poly3DCollection([], facecolors='blue', edgecolors='darkblue', alpha=0.8, linewidths=1))
-        self.closeup_fin_right = self.ax_closeup.add_collection3d(Poly3DCollection([], facecolors='blue', edgecolors='darkblue', alpha=0.8, linewidths=1))
-        self.closeup_velocity_arrow, = self.ax_closeup.plot([], [], [], 'c-', linewidth=2, alpha=0.7, label='Velocity')
-        # Aero force vectors for each surface
-        self.closeup_aero_canard_top, = self.ax_closeup.plot([], [], [], 'm-', linewidth=2, alpha=0.8)
-        self.closeup_aero_canard_bottom, = self.ax_closeup.plot([], [], [], 'm-', linewidth=2, alpha=0.8)
-        self.closeup_aero_canard_left, = self.ax_closeup.plot([], [], [], 'm-', linewidth=2, alpha=0.8)
-        self.closeup_aero_canard_right, = self.ax_closeup.plot([], [], [], 'm-', linewidth=2, alpha=0.8)
-        self.closeup_aero_fin_top, = self.ax_closeup.plot([], [], [], 'orange', linewidth=2, alpha=0.8)
-        self.closeup_aero_fin_bottom, = self.ax_closeup.plot([], [], [], 'orange', linewidth=2, alpha=0.8)
-        self.closeup_aero_fin_left, = self.ax_closeup.plot([], [], [], 'orange', linewidth=2, alpha=0.8)
-        self.closeup_aero_fin_right, = self.ax_closeup.plot([], [], [], 'orange', linewidth=2, alpha=0.8)
-        # Add dummy lines for legend (moved after orientation axes creation)
-        
-        # Note: Legend items for orientation axes (Forward/Right/Up) will be added automatically from the actual lines
-        
-        # Closeup info text
-        self.closeup_text = self.ax_closeup.text2D(0.02, 0.98, '', transform=self.ax_closeup.transAxes,
-                                                   verticalalignment='top', fontfamily='monospace', fontsize=8)
+        # Closeup view completely disabled for maximum performance
+        # (OBJ loading and 3D mesh rendering is too expensive for matplotlib)
         
         # Keyboard controls
         self.fig.canvas.mpl_connect('key_press_event', self.on_key)
         self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
         
-        # Animation timer
+        # Animation timer (60 FPS)
         self.animation_timer = self.fig.canvas.new_timer(interval=int(self.dt * 1000))
         self.animation_timer.add_callback(self.update)
         self.animation_timer.start()
+        
+        # Cache for rotation matrix
+        self._cached_rotation_matrix = None
+        self._cached_orientation = None
         # Performance helpers
         self.frame_count = 0
-        self.closeup_update_interval = 3  # update closeup every N frames
+        self.closeup_update_interval = 10  # update closeup every N frames (drastically reduced)
+        self.path_update_interval = 2  # only update paths every N frames
+        
+        # Rendering optimization
+        self.use_blit = True
+        self.background = None
+        self.skip_frames = 0  # Frame skipping counter
     
     def load_obj_model(self, filepath):
         """Load OBJ file and parse mesh data by object name"""
@@ -262,82 +257,167 @@ class MissileSimulation:
         return forward, right, up
     
     def calculate_aero_forces(self, speed):
-        """Calculate aerodynamic forces from control surfaces"""
+        """Calculate aerodynamic forces from control surfaces with realistic aerodynamics"""
         if speed < 1.0:
             return np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0])
         
         forward, right, up = self.get_body_axes()
         vel_dir = self.missile_vel / speed
         
-        rho = 1.225  # Air density kg/m³
+        # Air density (kg/m³) - decreases with altitude
+        altitude = self.missile_pos[2]
+        rho = 1.225 * np.exp(-altitude / 8500.0)  # Exponential atmosphere model
         q = 0.5 * rho * speed * speed  # Dynamic pressure
         
         total_force = np.array([0.0, 0.0, 0.0])
         total_moment = np.array([0.0, 0.0, 0.0])
         
-        # CANARDS: [top, bottom, left, right]
-        # Normal directions in body frame
-        canard_normals = [up, -up, right, -right]
-        self.canard_forces = []
+        # Body drag (always opposes velocity)
+        drag_force = -vel_dir * q * self.body_drag_coeff * self.body_area
+        total_force += drag_force
         
-        for i, normal in enumerate(canard_normals):
-            deflection = self.canard_deflection[i]
+        # CANARDS: [top, bottom, left, right]
+        self.canard_forces = []
+        canard_positions = [
+            ('Can_TOP', 0),
+            ('Can_DOWN', 1),
+            ('Can_LEFT', 2),
+            ('Can_RIGHT', 3)
+        ]
+        
+        for obj_name, idx in canard_positions:
+            if obj_name not in self.obj_centers:
+                self.canard_forces.append(np.array([0.0, 0.0, 0.0]))
+                continue
             
-            # AoA is simply the deflection angle (angle between surface and airflow)
-            local_aoa = deflection
+            deflection = self.canard_deflection[idx]
+            
+            # Get surface center position in body frame
+            surface_center = np.array(self.obj_centers[obj_name])
+            
+            # Calculate surface normal based on deflection
+            if idx < 2:  # Top/Bottom - rotate around Z axis
+                initial_normal = np.array([0, 1, 0]) if idx == 0 else np.array([0, -1, 0])
+                cos_a, sin_a = np.cos(deflection), np.sin(deflection)
+                rot_z = np.array([[cos_a, -sin_a, 0], [sin_a, cos_a, 0], [0, 0, 1]])
+                surface_normal = rot_z @ initial_normal
+            else:  # Left/Right - rotate around Y axis
+                initial_normal = np.array([0, 0, 1]) if idx == 2 else np.array([0, 0, -1])
+                cos_a, sin_a = np.cos(deflection), np.sin(deflection)
+                rot_y = np.array([[cos_a, 0, sin_a], [0, 1, 0], [-sin_a, 0, cos_a]])
+                surface_normal = rot_y @ initial_normal
+            
+            # Convert surface normal to world frame
+            R = self.get_rotation_matrix()
+            surface_normal_world = R @ surface_normal
+            
+            # Calculate angle of attack (angle between velocity and surface normal)
+            # The lift is perpendicular to both the velocity and the surface
+            cos_aoa = np.dot(vel_dir, surface_normal_world)
+            sin_aoa = np.sqrt(max(0, 1 - cos_aoa**2))
+            aoa = np.arcsin(sin_aoa) * np.sign(cos_aoa)
             
             # Calculate lift coefficient with stall
-            if abs(local_aoa) < self.canard_stall_angle:
-                Cl = self.canard_lift_slope * local_aoa
+            if abs(aoa) < self.canard_stall_angle:
+                Cl = self.canard_lift_slope * aoa
             else:
-                Cl = self.canard_lift_slope * self.canard_stall_angle * np.sign(local_aoa) * 0.5
+                Cl = self.canard_lift_slope * self.canard_stall_angle * np.sign(aoa) * 0.5
             
-            # Force perpendicular to surface (along normal)
-            lift = q * Cl * self.canard_area * normal
+            # Lift direction: perpendicular to velocity, in the plane of velocity and normal
+            # Lift = q * Cl * A * lift_direction
+            if sin_aoa > 0.01:  # Avoid division by zero
+                lift_dir = surface_normal_world - vel_dir * cos_aoa
+                lift_dir = lift_dir / np.linalg.norm(lift_dir)
+            else:
+                lift_dir = surface_normal_world
             
-            total_force += lift
-            self.canard_forces.append(lift)
+            lift_magnitude = q * Cl * self.canard_area
+            lift_force = lift_dir * lift_magnitude
             
-            # Moment arm from CoG
-            moment_arm = forward * self.canard_distance
-            total_moment += np.cross(moment_arm, lift)
+            # Drag on the surface (proportional to sin²(aoa))
+            surface_drag = -vel_dir * q * 0.1 * self.canard_area * (sin_aoa**2)
             
-            if i < 2:  # Roll moment for top/bottom canards
-                roll_arm = self.canard_distance * 0.15
-                roll_moment = np.cross(forward * roll_arm, lift)
-                total_moment += roll_moment
+            total_surface_force = lift_force + surface_drag
+            total_force += total_surface_force
+            self.canard_forces.append(total_surface_force)
+            
+            # Calculate moment around CoG
+            # Position of force application (surface center) in world frame
+            force_position_world = R @ surface_center
+            moment_arm = force_position_world
+            total_moment += np.cross(moment_arm, total_surface_force)
         
         # REAR FINS: [top, bottom, left, right]
-        # Normal directions in body frame
-        fin_normals = [up, -up, right, -right]
         self.fin_forces = []
+        fin_positions = [
+            ('Stab_TOP', 0),
+            ('Stab_DOWN', 1),
+            ('Stab_LEFT', 2),
+            ('Stab_RIGHT', 3)
+        ]
         
-        for i, normal in enumerate(fin_normals):
-            deflection = self.fin_deflection[i]
+        for obj_name, idx in fin_positions:
+            if obj_name not in self.obj_centers:
+                self.fin_forces.append(np.array([0.0, 0.0, 0.0]))
+                continue
             
-            # AoA is simply the deflection angle
-            local_aoa = deflection
+            deflection = self.fin_deflection[idx]
+            
+            # Get surface center position in body frame
+            surface_center = np.array(self.obj_centers[obj_name])
+            
+            # Calculate surface normal based on deflection
+            if idx < 2:  # Top/Bottom - rotate around Z axis
+                initial_normal = np.array([0, 1, 0]) if idx == 0 else np.array([0, -1, 0])
+                cos_a, sin_a = np.cos(deflection), np.sin(deflection)
+                rot_z = np.array([[cos_a, -sin_a, 0], [sin_a, cos_a, 0], [0, 0, 1]])
+                surface_normal = rot_z @ initial_normal
+            else:  # Left/Right - rotate around Y axis
+                initial_normal = np.array([0, 0, 1]) if idx == 2 else np.array([0, 0, -1])
+                cos_a, sin_a = np.cos(deflection), np.sin(deflection)
+                rot_y = np.array([[cos_a, 0, sin_a], [0, 1, 0], [-sin_a, 0, cos_a]])
+                surface_normal = rot_y @ initial_normal
+            
+            # Convert surface normal to world frame
+            R = self.get_rotation_matrix()
+            surface_normal_world = R @ surface_normal
+            
+            # Calculate angle of attack
+            cos_aoa = np.dot(vel_dir, surface_normal_world)
+            sin_aoa = np.sqrt(max(0, 1 - cos_aoa**2))
+            aoa = np.arcsin(sin_aoa) * np.sign(cos_aoa)
             
             # Calculate lift coefficient with stall
-            if abs(local_aoa) < self.canard_stall_angle:
-                Cl = self.fin_lift_slope * local_aoa
+            if abs(aoa) < self.canard_stall_angle:
+                Cl = self.fin_lift_slope * aoa
             else:
-                Cl = self.fin_lift_slope * self.canard_stall_angle * np.sign(local_aoa) * 0.5
+                Cl = self.fin_lift_slope * self.canard_stall_angle * np.sign(aoa) * 0.5
             
-            # Force perpendicular to surface (along normal)
-            lift = q * Cl * self.fin_area * normal
+            # Lift direction
+            if sin_aoa > 0.01:
+                lift_dir = surface_normal_world - vel_dir * cos_aoa
+                lift_dir = lift_dir / np.linalg.norm(lift_dir)
+            else:
+                lift_dir = surface_normal_world
             
-            total_force += lift
-            self.fin_forces.append(lift)
+            lift_magnitude = q * Cl * self.fin_area
+            lift_force = lift_dir * lift_magnitude
             
-            # Moment arm from CoG (rear fins)
-            moment_arm = -forward * self.fin_distance
-            total_moment += np.cross(moment_arm, lift)
+            # Drag on the surface
+            surface_drag = -vel_dir * q * 0.1 * self.fin_area * (sin_aoa**2)
             
-            if i < 2:  # Roll moment for top/bottom fins
-                roll_arm = self.fin_distance * 0.2
-                roll_moment = np.cross(-forward * roll_arm, lift)
-                total_moment += roll_moment
+            total_surface_force = lift_force + surface_drag
+            total_force += total_surface_force
+            self.fin_forces.append(total_surface_force)
+            
+            # Calculate moment around CoG
+            force_position_world = R @ surface_center
+            moment_arm = force_position_world
+            total_moment += np.cross(moment_arm, total_surface_force)
+        
+        # Angular damping (air resistance to rotation)
+        damping_moment = -self.angular_velocity * 0.5 * rho * speed * 0.1
+        total_moment += damping_moment
         
         return total_force / self.missile_mass, total_moment / self.moment_of_inertia
     
@@ -360,19 +440,51 @@ class MissileSimulation:
         # Get missile orientation axes
         forward, right, up = self.get_body_axes()
         
-        # Get relative velocity
+        # Line of sight unit vector
+        los = r / distance
+        
+        # Closing velocity (rate of decrease of distance)
+        v_closing = -np.dot(self.missile_vel - self.target_vel, los)
+        self.debug_v_closing = v_closing
+        
+        # Line of sight rate (angular velocity of LOS)
+        # los_rate = (v_rel - los * v_closing) / distance
         v_rel = self.target_vel - self.missile_vel
+        los_rate = (v_rel - los * np.dot(v_rel, los)) / distance
         
+        # Proportional navigation: acceleration perpendicular to LOS
+        # a_cmd = N * v_closing * los_rate
+        speed = np.linalg.norm(self.missile_vel)
+        if v_closing > 10.0 and speed > 10.0:
+            a_cmd = self.guidance_gain * v_closing * los_rate
+            self.debug_guidance_accel = a_cmd
+        else:
+            # If not closing or slow, just point at target
+            a_cmd = (los - forward) * 10.0
+            self.debug_guidance_accel = a_cmd
         
+        # Convert acceleration command to body frame
+        a_up = np.dot(a_cmd, up)  # Pitch control
+        a_right = np.dot(a_cmd, right)  # Yaw control
         
-        # ==========================================
-        # Convert acceleration command to canard deflections
-        # ==========================================
-        # Differential control: top/bottom for pitch, left/right for yaw
-        # Positive pitch (up) = top deflects positive, bottom deflects negative
-        # Positive yaw (right) = left deflects positive, right deflects negative
+        # Simple P controller: deflection proportional to desired acceleration
+        # Positive a_up (want to go up) -> top canard positive, bottom negative
+        # Positive a_right (want to go right) -> left canard positive, right negative
         
-        canard_cmds = np.array([0.0, 0.0, 0.0, 0.01])  # [top, bottom, left, right]
+        gain = 0.002  # Deflection per m/s² (tune this)
+        
+        pitch_cmd = a_up * gain
+        yaw_cmd = a_right * gain
+        
+        canard_cmds = np.array([
+            pitch_cmd,   # top
+            -pitch_cmd,  # bottom (opposite)
+            yaw_cmd,     # left
+            -yaw_cmd     # right (opposite)
+        ])
+        
+        # Clamp to max deflection
+        canard_cmds = np.clip(canard_cmds, -self.canard_max_deflection, self.canard_max_deflection)
         
         return canard_cmds
     
@@ -391,9 +503,11 @@ class MissileSimulation:
         self.target_vel[1] = self.target_radius * self.target_angular_speed * np.cos(self.target_angle)
         self.target_vel[2] = 0.0
         
-        self.target_path.append(self.target_pos.copy())
-        if len(self.target_path) > 500:
-            self.target_path.pop(0)
+        # Only update path occasionally for performance
+        if self.frame_count % self.path_update_interval == 0:
+            self.target_path.append(self.target_pos.copy())
+            if len(self.target_path) > 100:  # Reduced from 200
+                self.target_path.pop(0)
         
         # Update missile
         if self.missile_active:
@@ -446,6 +560,9 @@ class MissileSimulation:
             # Keep pitch in reasonable range
             self.missile_pitch = np.clip(self.missile_pitch, -np.pi/2, np.pi/2)
             
+            # Invalidate rotation matrix cache
+            self._cached_orientation = None
+            
             # Update velocity and position
             self.missile_vel += total_accel * effective_dt
             
@@ -476,9 +593,11 @@ class MissileSimulation:
                 self.missile_active = False
                 print("MISSILE OUT OF BOUNDS")
             
-            self.missile_path.append(self.missile_pos.copy())
-            if len(self.missile_path) > 500:
-                self.missile_path.pop(0)
+            # Only update path occasionally for performance
+            if self.frame_count % self.path_update_interval == 0:
+                self.missile_path.append(self.missile_pos.copy())
+                if len(self.missile_path) > 100:  # Reduced from 200
+                    self.missile_path.pop(0)
         
         # Update display
         self.update_display()
@@ -548,33 +667,28 @@ class MissileSimulation:
             distance = np.linalg.norm(self.target_pos - self.missile_pos) / 1000.0
             speed_kmh = np.linalg.norm(self.missile_vel) * 3.6
             fuel_left = max(0, self.missile_fuel - self.missile_time)
-            info = f"MISSILE ACTIVE\n"
-            info += f"Distance: {distance:.2f} km\n"
-            info += f"Speed: {speed_kmh:.0f} km/h\n"
-            info += f"Fuel: {fuel_left:.1f}s\n"
-            info += f"Time: {self.missile_time:.1f}s\n"
+            alt_km = self.missile_pos[2] / 1000.0
+            info = f"ACTIVE | Dist: {distance:.2f}km | Speed: {speed_kmh:.0f}km/h\n"
+            info += f"Alt: {alt_km:.2f}km | Fuel: {fuel_left:.1f}s | Time: {self.missile_time:.1f}s\n"
             if hasattr(self, 'debug_v_closing'):
-                info += f"Closing: {self.debug_v_closing:.1f} m/s\n"
-            if hasattr(self, 'debug_guidance_accel'):
-                guide_mag = np.linalg.norm(self.debug_guidance_accel)
-                info += f"Guidance: {guide_mag:.1f} m/s²\n"
-            info += f"Sim Speed: {self.sim_speed:.2f}x"
+                info += f"Closing: {self.debug_v_closing:.1f}m/s | "
+            info += f"SimSpeed: {self.sim_speed:.1f}x\n"
+            info += f"Canards: T{np.degrees(self.canard_deflection[0]):+.0f}° B{np.degrees(self.canard_deflection[1]):+.0f}° L{np.degrees(self.canard_deflection[2]):+.0f}° R{np.degrees(self.canard_deflection[3]):+.0f}°"
         elif self.missile_spawned:
             distance = np.linalg.norm(self.target_pos - self.missile_pos) / 1000.0
-            info = f"MISSILE READY\n"
-            info += f"Distance to target: {distance:.2f} km\n\n"
-            info += f"Press SPACE to launch\nPress R to reset\nScroll to change speed\nSim Speed: {self.sim_speed:.2f}x"
+            info = f"READY | Distance: {distance:.2f}km\n"
+            info += f"SPACE=Launch | R=Reset | Scroll=Speed | SimSpeed: {self.sim_speed:.1f}x"
         else:
-            info = f"Press SPACE to spawn\nScroll to change speed\nSim Speed: {self.sim_speed:.2f}x"
+            info = f"SPACE=Spawn | Scroll=Speed | SimSpeed: {self.sim_speed:.1f}x"
         
         self.info_text.set_text(info)
         
-        # Throttle expensive closeup 3D mesh updates
+        # Update display (closeup disabled for performance)
         self.frame_count += 1
-        if self.frame_count % self.closeup_update_interval == 0:
-            self.update_closeup()
         
+        # Only redraw when needed
         self.fig.canvas.draw_idle()
+        self.fig.canvas.flush_events()
     
     def rotate_mesh(self, faces, angle, axis, center):
         """Rotate mesh faces around an axis through the object's center"""
@@ -601,8 +715,13 @@ class MissileSimulation:
             rotated_faces.append(rotated_face)
         return rotated_faces
     
-    def get_rotation_matrix(self):
+    def get_rotation_matrix(self, use_cache=True):
         """Get rotation matrix for missile orientation (pitch, yaw, roll)"""
+        # Check cache
+        current_orientation = (self.missile_pitch, self.missile_yaw, self.missile_roll)
+        if use_cache and self._cached_orientation == current_orientation:
+            return self._cached_rotation_matrix
+        
         # Rotation around Z-axis (yaw)
         cos_yaw, sin_yaw = np.cos(self.missile_yaw), np.sin(self.missile_yaw)
         R_yaw = np.array([
@@ -628,7 +747,14 @@ class MissileSimulation:
         ])
         
         # Combined rotation: first roll, then pitch, then yaw
-        return R_yaw @ R_pitch @ R_roll
+        R = R_yaw @ R_pitch @ R_roll
+        
+        # Cache result
+        if use_cache:
+            self._cached_rotation_matrix = R
+            self._cached_orientation = current_orientation
+        
+        return R
     
     def transform_mesh_to_world(self, faces):
         """Transform mesh from body frame to world frame showing missile orientation"""
@@ -644,7 +770,9 @@ class MissileSimulation:
         return transformed_faces
     
     def update_closeup(self):
-        """Update the closeup view showing missile control surfaces"""
+        """Closeup view disabled for performance"""
+        return  # Disabled for performance
+        
         if not self.missile_spawned:
             # Clear closeup when not spawned
             self.closeup_body.set_segments([])
@@ -671,50 +799,45 @@ class MissileSimulation:
         # Get body axes
         forward, right, up = self.get_body_axes()
         
-        # Draw body from OBJ as wireframe (edges only) with rotation applied
-        if 'Body' in self.obj_data:
-            # Transform body to show missile orientation
-            transformed_body = self.transform_mesh_to_world(self.obj_data['Body'])
-            edges = []
-            for face in transformed_body:
-                # Create edges from face vertices
-                for i in range(len(face)):
-                    edges.append([face[i], face[(i + 1) % len(face)]])
-            self.closeup_body.set_segments(edges)
+        # DISABLED: Body wireframe is too expensive for real-time rendering
+        # Just clear it to avoid confusion
+        if self.frame_count == 1:
+            self.closeup_body.set_segments([])
         
-        # Canards from OBJ with rotation (deflection + missile orientation)
-        # Top/Down rotate around Z-axis, Left/Right rotate around Y-axis
-        canard_objects = [
-            ('Can_TOP', self.closeup_canard_top, self.canard_deflection[0], 'z'),
-            ('Can_DOWN', self.closeup_canard_bottom, self.canard_deflection[1], 'z'),
-            ('Can_LEFT', self.closeup_canard_left, self.canard_deflection[2], 'y'),
-            ('Can_RIGHT', self.closeup_canard_right, self.canard_deflection[3], 'y')
-        ]
+        # Canards from OBJ with rotation - simplified rendering
+        # Only update if significant change in deflection
+        if self.frame_count % (self.closeup_update_interval * 2) == 0:
+            canard_objects = [
+                ('Can_TOP', self.closeup_canard_top, self.canard_deflection[0], 'z'),
+                ('Can_DOWN', self.closeup_canard_bottom, self.canard_deflection[1], 'z'),
+                ('Can_LEFT', self.closeup_canard_left, self.canard_deflection[2], 'y'),
+                ('Can_RIGHT', self.closeup_canard_right, self.canard_deflection[3], 'y')
+            ]
+            
+            for obj_name, poly, angle, axis in canard_objects:
+                if obj_name in self.obj_data and obj_name in self.obj_centers:
+                    # First apply canard deflection
+                    rotated_faces = self.rotate_mesh(self.obj_data[obj_name], angle, axis, self.obj_centers[obj_name])
+                    # Then apply missile orientation
+                    transformed_faces = self.transform_mesh_to_world(rotated_faces)
+                    poly.set_verts(transformed_faces)
         
-        for obj_name, poly, angle, axis in canard_objects:
-            if obj_name in self.obj_data and obj_name in self.obj_centers:
-                # First apply canard deflection
-                rotated_faces = self.rotate_mesh(self.obj_data[obj_name], angle, axis, self.obj_centers[obj_name])
-                # Then apply missile orientation
-                transformed_faces = self.transform_mesh_to_world(rotated_faces)
-                poly.set_verts(transformed_faces)
-        
-        # Rear fins from OBJ with rotation (deflection + missile orientation)
-        # Top/Down rotate around Z-axis, Left/Right rotate around Y-axis
-        fin_objects = [
-            ('Stab_TOP', self.closeup_fin_top, self.fin_deflection[0], 'z'),
-            ('Stab_DOWN', self.closeup_fin_bottom, self.fin_deflection[1], 'z'),
-            ('Stab_LEFT', self.closeup_fin_left, self.fin_deflection[2], 'y'),
-            ('Stab_RIGHT', self.closeup_fin_right, self.fin_deflection[3], 'y')
-        ]
-        
-        for obj_name, poly, angle, axis in fin_objects:
-            if obj_name in self.obj_data and obj_name in self.obj_centers:
-                # First apply fin deflection
-                rotated_faces = self.rotate_mesh(self.obj_data[obj_name], angle, axis, self.obj_centers[obj_name])
-                # Then apply missile orientation
-                transformed_faces = self.transform_mesh_to_world(rotated_faces)
-                poly.set_verts(transformed_faces)
+        # Rear fins from OBJ with rotation - simplified rendering
+        if self.frame_count % (self.closeup_update_interval * 2) == 0:
+            fin_objects = [
+                ('Stab_TOP', self.closeup_fin_top, self.fin_deflection[0], 'z'),
+                ('Stab_DOWN', self.closeup_fin_bottom, self.fin_deflection[1], 'z'),
+                ('Stab_LEFT', self.closeup_fin_left, self.fin_deflection[2], 'y'),
+                ('Stab_RIGHT', self.closeup_fin_right, self.fin_deflection[3], 'y')
+            ]
+            
+            for obj_name, poly, angle, axis in fin_objects:
+                if obj_name in self.obj_data and obj_name in self.obj_centers:
+                    # First apply fin deflection
+                    rotated_faces = self.rotate_mesh(self.obj_data[obj_name], angle, axis, self.obj_centers[obj_name])
+                    # Then apply missile orientation
+                    transformed_faces = self.transform_mesh_to_world(rotated_faces)
+                    poly.set_verts(transformed_faces)
         
         # Velocity arrow (relative to body frame)
         speed = np.linalg.norm(self.missile_vel)
@@ -731,7 +854,11 @@ class MissileSimulation:
             self.closeup_velocity_arrow.set_data([0, vel_arrow_end[0]], [0, vel_arrow_end[1]])
             self.closeup_velocity_arrow.set_3d_properties([0, vel_arrow_end[2]])
         
-        # Draw aero force vectors (along surface normal) - transformed with missile rotation
+        # Draw aero force vectors - SIMPLIFIED for performance
+        # Only update every few closeup frames
+        if self.frame_count % (self.closeup_update_interval * 3) != 0:
+            return  # Skip expensive force vector updates
+        
         force_scale = 0.002  # Scale forces for visibility
         canard_aero_lines = [self.closeup_aero_canard_top, self.closeup_aero_canard_bottom,
                             self.closeup_aero_canard_left, self.closeup_aero_canard_right]
