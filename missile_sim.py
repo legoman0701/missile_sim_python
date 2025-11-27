@@ -129,7 +129,9 @@ class MissileSimulation:
         
         # Closeup view elements (missile body and control surfaces from OBJ)
         # Wireframe rendering (edges only, no faces)
-        self.closeup_body = self.ax_closeup.add_collection3d(Line3DCollection([], colors='black', linewidths=1.5))
+        # Initialize with dummy segment to avoid auto_scale_xyz error with empty collection
+        self.closeup_body = Line3DCollection([[[0,0,0],[0,0,0]]], colors='black', linewidths=1.5)
+        self.ax_closeup.add_collection3d(self.closeup_body)
         # 4 individual canards (front)
         self.closeup_canard_top = self.ax_closeup.add_collection3d(Poly3DCollection([], facecolors='red', edgecolors='darkred', alpha=0.8, linewidths=1))
         self.closeup_canard_bottom = self.ax_closeup.add_collection3d(Poly3DCollection([], facecolors='red', edgecolors='darkred', alpha=0.8, linewidths=1))
