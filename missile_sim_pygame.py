@@ -74,7 +74,11 @@ class MissileSimulation:
         # Initialize pointing up (pitch = -90 degrees)
         self.missile_quat = self.euler_to_quaternion(0.0, -np.pi / 2.0, 0.0)
         self.angular_velocity = np.array([0.0, 0.0, 0.0])  # [pitch_rate, yaw_rate, roll_rate]
-        self.moment_of_inertia = 2.0
+        self.moment_of_inertia_long = 0.3 # kg*m^2
+        self.moment_of_inertia_trns = 65.0 # kg*m^2
+        
+        self.canard_forces = [0.0, 0.0, 0.0, 0.0]
+        self.fin_forces = [0.0, 0.0, 0.0, 0.0]
         
         # Guidance
         self.guidance_gain = 3
@@ -300,265 +304,186 @@ class MissileSimulation:
         
         return forward, right, up
     
-    def calculate_aero_forces(self, speed):
-        """Calculate aerodynamic forces"""
-        # Initialize force storage for visualization
-        self.canard_forces = [np.array([0.0, 0.0, 0.0]) for _ in range(4)]
-        self.fin_forces = [np.array([0.0, 0.0, 0.0]) for _ in range(4)]
-        
-        if speed < 1.0:
-            return np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0])
-        
-        forward, right, up = self.get_body_axes()
-        vel_dir = self.missile_vel / speed
-        
-        altitude = self.missile_pos[2]
-        rho = 1.225 * np.exp(-altitude / 8500.0)
-        q = 0.5 * rho * speed * speed
-        
-        total_force = np.array([0.0, 0.0, 0.0])
-        total_moment = np.array([0.0, 0.0, 0.0])
-        
-        # Body drag
-        drag_force = -vel_dir * q * self.body_drag_coeff * self.body_area
-        total_force += drag_force
-        
-        # Get missile rotation matrix
-        R = self.get_rotation_matrix()
-        
-        # Canard forces using actual surface normals
-        canard_names = ['Can_TOP', 'Can_DOWN', 'Can_LEFT', 'Can_RIGHT']
-        canard_axes = ['z', 'z', 'y', 'y']
-        
-        for i, (obj_name, axis) in enumerate(zip(canard_names, canard_axes)):
-            deflection = self.canard_deflection[i]
-            if abs(deflection) > 0.001:
-                # Get surface normal in body frame
-                normal_body = self.get_surface_normal(obj_name, deflection, axis)
-                
-                # Transform normal to world frame
-                normal_world = R @ normal_body
-                
-                # Calculate angle of attack (angle between velocity and normal)
-                cos_aoa = np.dot(vel_dir, normal_world)
-                sin_aoa = np.sqrt(max(0, 1 - cos_aoa**2))
-                aoa = np.arcsin(sin_aoa) * np.sign(cos_aoa)
-                
-                # Calculate lift coefficient with stall
-                if abs(aoa) < self.canard_stall_angle:
-                    Cl = self.canard_lift_slope * aoa
-                else:
-                    Cl = self.canard_lift_slope * self.canard_stall_angle * np.sign(aoa) * 0.5
-                
-                # Lift direction: perpendicular to velocity, in plane of velocity and normal
-                if sin_aoa > 0.01:
-                    lift_dir = normal_world - vel_dir * cos_aoa
-                    lift_dir = lift_dir / np.linalg.norm(lift_dir)
-                else:
-                    lift_dir = normal_world
-                
-                # Calculate force
-                lift_magnitude = q * Cl * self.canard_area
-                force = lift_dir * lift_magnitude
-                
-                # Drag on surface
-                surface_drag = -vel_dir * q * 0.1 * self.canard_area * (sin_aoa**2)
-                force += surface_drag
-                
-                self.canard_forces[i] = force  # Store for visualization
-                total_force += force
-                
-                # Moment around CoG
-                moment_arm = forward * self.canard_distance
-                total_moment += np.cross(moment_arm, force)
-        
-        # Fin forces using actual surface normals - provide passive stability
-        fin_names = ['Stab_TOP', 'Stab_DOWN', 'Stab_LEFT', 'Stab_RIGHT']
-        fin_axes = ['z', 'z', 'y', 'y']
-        
-        for i, (obj_name, axis) in enumerate(zip(fin_names, fin_axes)):
-            deflection = self.fin_deflection[i]
-            
-            # Get surface normal in body frame (with deflection)
-            normal_body = self.get_surface_normal(obj_name, deflection, axis)
-            
-            # Transform normal to world frame
-            normal_world = R @ normal_body
-            
-            # Calculate fin position in body frame
-            fin_radius = 0.8
-            if i == 0:  # TOP
-                fin_pos_body = np.array([self.fin_distance, 0.0, fin_radius])
-            elif i == 1:  # DOWN
-                fin_pos_body = np.array([self.fin_distance, 0.0, -fin_radius])
-            elif i == 2:  # LEFT
-                fin_pos_body = np.array([self.fin_distance, -fin_radius, 0.0])
-            else:  # RIGHT
-                fin_pos_body = np.array([self.fin_distance, fin_radius, 0.0])
-            
-            # Local airflow at fin includes missile velocity AND rotational velocity
-            # v_local = v_missile + omega x r_fin
-            fin_pos_world = R @ fin_pos_body
-            rotational_velocity = np.cross(self.angular_velocity, fin_pos_world)
-            local_velocity = self.missile_vel + rotational_velocity
-            local_speed = np.linalg.norm(local_velocity)
-            
-            if local_speed < 1.0:
-                self.fin_forces[i] = np.array([0.0, 0.0, 0.0])
-                continue
-                
-            local_vel_dir = local_velocity / local_speed
-            
-            # Calculate angle of attack using LOCAL airflow
-            # For a surface aligned with flow, normal is perpendicular to velocity -> cos=0
-            cos_aoa = np.dot(local_vel_dir, normal_world)
-            
-            # The angle of attack is the angle between velocity and the surface plane
-            # If cos_aoa ≈ 0, the flow is parallel to surface (no lift)
-            # If cos_aoa ≈ ±1, the flow hits the surface head-on (max lift)
-            aoa = np.arcsin(np.clip(cos_aoa, -1.0, 1.0))
-            
-            # Only generate forces if there's significant angle of attack
-            if abs(aoa) > 0.001:  # ~0.06 degrees threshold
-                # Calculate lift coefficient with stall
-                if abs(aoa) < self.canard_stall_angle:
-                    Cl = self.fin_lift_slope * aoa
-                else:
-                    Cl = self.fin_lift_slope * self.canard_stall_angle * np.sign(aoa) * 0.5
-                
-                # Lift direction: perpendicular to LOCAL velocity and in plane of normal
-                if abs(cos_aoa) > 0.01:
-                    lift_dir = normal_world - local_vel_dir * cos_aoa
-                    lift_norm = np.linalg.norm(lift_dir)
-                    if lift_norm > 0.01:
-                        lift_dir = lift_dir / lift_norm
-                    else:
-                        lift_dir = normal_world
-                else:
-                    # Flow is parallel to surface, no lift
-                    lift_dir = np.array([0.0, 0.0, 0.0])
-                
-                # Calculate force using LOCAL dynamic pressure
-                q_local = 0.5 * rho * (local_speed ** 2)
-                lift_magnitude = q_local * Cl * self.fin_area
-                force = lift_dir * lift_magnitude
-                
-                # Drag on surface (proportional to sin²(aoa))
-                sin_aoa = np.sin(aoa)
-                surface_drag = -local_vel_dir * q_local * 0.1 * self.fin_area * (sin_aoa**2)
-                force += surface_drag
-                
-                self.fin_forces[i] = force  # Store for visualization
-                total_force += force
-                
-                # Moment around CoG - fins are at the rear, positioned around the body
-                # Fins need large perpendicular distance for effective stabilization
-                # Body radius is ~0.15m, fins extend to ~0.8m from centerline
-                fin_radius = 0.8  # Distance from body centerline to fin center
-                
-                if i == 0:  # TOP
-                    moment_arm_body = np.array([self.fin_distance, 0.0, fin_radius])
-                elif i == 1:  # DOWN
-                    moment_arm_body = np.array([self.fin_distance, 0.0, -fin_radius])
-                elif i == 2:  # LEFT
-                    moment_arm_body = np.array([self.fin_distance, -fin_radius, 0.0])
-                else:  # RIGHT
-                    moment_arm_body = np.array([self.fin_distance, fin_radius, 0.0])
-                
-                moment_arm_world = R @ moment_arm_body
-                total_moment += np.cross(moment_arm_world, force)
-            else:
-                # No significant AoA, no force
-                self.fin_forces[i] = np.array([0.0, 0.0, 0.0])
-        
-        # Angular damping (increased for stability)
-        damping_moment = -self.angular_velocity * 0.5 * rho * speed * 0.5
-        total_moment += damping_moment
-        
-        # Debug output every frame for fast debugging
-        if self.debug_enabled:
-            yaw, pitch, roll = self.quaternion_to_euler(self.missile_quat)
-            print(f"\n=== FRAME {self.frame_count} ===")
-            print(f"Speed: {speed:.1f} m/s | Alt: {self.missile_pos[2]:.0f}m")
-            print(f"Orientation - Pitch: {np.degrees(pitch):+.1f}° Yaw: {np.degrees(yaw):+.1f}° Roll: {np.degrees(roll):+.1f}°")
-            print(f"Angular Vel - Pitch: {np.degrees(self.angular_velocity[0]):+.1f}°/s Yaw: {np.degrees(self.angular_velocity[1]):+.1f}°/s Roll: {np.degrees(self.angular_velocity[2]):+.1f}°/s")
-            
-            print(f"\nCanard Deflections:")
-            for i, name in enumerate(['TOP', 'DOWN', 'LEFT', 'RIGHT']):
-                deflection_deg = np.degrees(self.canard_deflection[i])
-                force_mag = np.linalg.norm(self.canard_forces[i])
-                print(f"  {name}: {deflection_deg:+.1f}° -> Force: {force_mag:.1f}N")
-            
-            print(f"\nFin Deflections & Forces:")
-            fin_names_list = ['Stab_TOP', 'Stab_DOWN', 'Stab_LEFT', 'Stab_RIGHT']
-            fin_axes = ['z', 'z', 'y', 'y']
-            for i, (obj_name, axis, name) in enumerate(zip(fin_names_list, fin_axes, ['TOP', 'DOWN', 'LEFT', 'RIGHT'])):
-                deflection_deg = np.degrees(self.fin_deflection[i])
-                force_mag = np.linalg.norm(self.fin_forces[i])
-                
-                # Get normal and AoA
-                if obj_name in self.obj_data:
-                    normal_body = self.get_surface_normal(obj_name, self.fin_deflection[i], axis)
-                    normal_world = R @ normal_body
-                    cos_aoa = np.dot(vel_dir, normal_world)
-                    aoa = np.arcsin(np.clip(cos_aoa, -1.0, 1.0))
-                    print(f"  {name}: Defl={deflection_deg:+.1f}° AoA={np.degrees(aoa):+.1f}° Force={force_mag:.1f}N")
-                    print(f"    Normal_body: [{normal_body[0]:.2f}, {normal_body[1]:.2f}, {normal_body[2]:.2f}]")
-                    print(f"    Normal_world: [{normal_world[0]:.2f}, {normal_world[1]:.2f}, {normal_world[2]:.2f}]")
-                    print(f"    Force: [{self.fin_forces[i][0]:.1f}, {self.fin_forces[i][1]:.1f}, {self.fin_forces[i][2]:.1f}]N")
-            
-            print(f"\nTotal Force: [{total_force[0]:.1f}, {total_force[1]:.1f}, {total_force[2]:.1f}]N")
-            print(f"Total Moment: [{total_moment[0]:.2f}, {total_moment[1]:.2f}, {total_moment[2]:.2f}]Nm")
-            print(f"Angular Accel: [{np.degrees(total_moment[0]/self.moment_of_inertia):+.1f}, {np.degrees(total_moment[1]/self.moment_of_inertia):+.1f}, {np.degrees(total_moment[2]/self.moment_of_inertia):+.1f}]°/s²")
-        
-            # Auto-close check after 1 second
-            if self.missile_time > self.auto_close_time:
-                print(f"\n=== AUTO-CLOSING after {self.auto_close_time}s ===")
-                pygame.quit()
-                sys.exit(0)
-        
-        self.debug_counter += 1
-        
-        return total_force / self.missile_mass, total_moment / self.moment_of_inertia
-    
     def guidance_law(self):
-        """Proportional navigation guidance"""
-        r = self.target_pos - self.missile_pos
-        distance = np.linalg.norm(r)
-        
-        if distance < 50.0:
-            print(f"HIT! Distance: {distance:.1f}m")
-            self.missile_active = False
-            return np.array([0.0, 0.0, 0.0, 0.0])
-        
-        forward, right, up = self.get_body_axes()
-        los = r / distance
-        
-        v_closing = -np.dot(self.missile_vel - self.target_vel, los)
-        v_rel = self.target_vel - self.missile_vel
-        los_rate = (v_rel - los * np.dot(v_rel, los)) / distance
-        
-        speed = np.linalg.norm(self.missile_vel)
-        if v_closing > 10.0 and speed > 10.0:
-            a_cmd = self.guidance_gain * v_closing * los_rate
-        else:
-            a_cmd = (los - forward) * 10.0
-        
-        a_up = np.dot(a_cmd, up)
-        a_right = np.dot(a_cmd, right)
-        
-        gain = 0.002
-        pitch_cmd = a_up * gain
-        yaw_cmd = a_right * gain
+        # """Proportional navigation guidance"""
+        # r = self.target_pos - self.missile_pos
+        # distance = np.linalg.norm(r)
+        # 
+        # if distance < 50.0:
+        #     print(f"HIT! Distance: {distance:.1f}m")
+        #     self.missile_active = False
+        #     return np.array([0.0, 0.0, 0.0, 0.0])
+        # 
+        # forward, right, up = self.get_body_axes()
+        # los = r / distance
+        # 
+        # v_closing = -np.dot(self.missile_vel - self.target_vel, los)
+        # v_rel = self.target_vel - self.missile_vel
+        # los_rate = (v_rel - los * np.dot(v_rel, los)) / distance
+        # 
+        # speed = np.linalg.norm(self.missile_vel)
+        # if v_closing > 10.0 and speed > 10.0:
+        #     a_cmd = self.guidance_gain * v_closing * los_rate
+        # else:
+        #     a_cmd = (los - forward) * 10.0
+        # 
+        # a_up = np.dot(a_cmd, up)
+        # a_right = np.dot(a_cmd, right)
+        # 
+        # gain = 0.002
+        # pitch_cmd = a_up * gain
+        # yaw_cmd = a_right * gain
         
         canard_cmds = np.array([
-            0.01,
+            0.1,
             0,
             0,
             0
         ])
         
         return np.clip(canard_cmds, -self.canard_max_deflection, self.canard_max_deflection)
+    
+    def calculate_lift(self, aoa, speed):
+        """Calculate lift and drag forces"""
+        rho = 1.225  # Air density at sea level (kg/m^3)
+        q = 0.5 * rho * speed * speed  # Dynamic pressure
+        lift = -aoa * q*0.002
+        drag = aoa * q*0.002
+        
+        return lift, #drag
+    
+    def calculate_aero_forces(self, speed):
+        # Apply missile orientation
+        if 'Body' in self.obj_centers:
+            body_center = self.obj_centers['Body']
+            glTranslatef(body_center[0], body_center[1], body_center[2])
+        
+        yaw, pitch, roll = self.quaternion_to_euler(self.missile_quat)
+        glRotatef(np.degrees(yaw), 0, 0, 1)
+        glRotatef(np.degrees(pitch), 0, 1, 0)
+        glRotatef(np.degrees(roll), 1, 0, 0)
+        
+        if 'Body' in self.obj_centers:
+            body_center = self.obj_centers['Body']
+            glTranslatef(-body_center[0], -body_center[1], -body_center[2])
+        
+        # Draw canard forces (magenta) - along surface normal
+        canard_names = ['Can_TOP', 'Can_DOWN', 'Can_LEFT', 'Can_RIGHT']
+        canard_axes = ['z', 'z', 'y', 'y']
+        
+        force_vectors = np.array([0.0, 0.0, 0.0])
+        moments_world = np.array([0.0, 0.0, 0.0])
+        # rotation matrix from body -> world
+        R = self.get_rotation_matrix()
+        for i, (obj_name, axis) in enumerate(zip(canard_names, canard_axes)):
+            if obj_name in self.obj_centers and 'Body' in self.obj_centers:
+                # Get vertex center (body coords)
+                center = self.obj_centers[obj_name]
+
+                # Get surface normal with deflection applied (body coords)
+                normal = self.get_surface_normal(obj_name, self.canard_deflection[i], axis)
+
+                # Compute fin position and velocity including rotational contribution (world frame)
+                model_scale = 100.0
+                r_body = (center - self.obj_centers['Body']) * model_scale
+                omega_world = R @ self.angular_velocity
+                r_world = R @ r_body
+                relative_fin_vel = self.missile_vel + np.cross(omega_world, r_world)
+
+                # Incoming flow direction (air relative to surface) is opposite of fin velocity
+                speed_fin = np.linalg.norm(relative_fin_vel) + 1e-9
+                flow_dir = -relative_fin_vel / speed_fin
+
+                # Surface normal: convert to world and normalize
+                normal_world = R @ normal
+                normal_world = normal_world / (np.linalg.norm(normal_world) + 1e-9)
+
+                # Angle between surface normal and incoming flow
+                cos_ang = np.clip(np.dot(normal_world, flow_dir), -1.0, 1.0)
+                aoa = np.arccos(cos_ang) - np.pi / 2.0
+                if self.debug_enabled:
+                    print(f"Canard {obj_name}: aoa={aoa:.6f}, cos={cos_ang:.6f}")
+
+                # calculate lift (unpack first return element)
+                lift, = self.calculate_lift(aoa, speed)
+                force_magnitude = lift
+
+                # Force vector in world coords
+                force_vector_world = normal_world * force_magnitude
+
+                # Accumulate forces and moments (moments in world frame)
+                force_vectors += force_vector_world
+                moments_world += np.cross(r_world, force_vector_world)
+
+                self.canard_forces[i] = force_magnitude
+             
+             
+        # Draw fin forces (cyan) - along surface normal
+        fin_names = ['Stab_TOP', 'Stab_DOWN', 'Stab_LEFT', 'Stab_RIGHT']
+        fin_axes = ['z', 'z', 'y', 'y']
+        
+        for i, (obj_name, axis) in enumerate(zip(fin_names, fin_axes)):
+            if obj_name in self.obj_centers and 'Body' in self.obj_centers:
+                # Get vertex center (body coords)
+                center = self.obj_centers[obj_name]
+
+                # Get surface normal with deflection applied (body coords)
+                normal = self.get_surface_normal(obj_name, self.fin_deflection[i], axis)
+
+                # Compute fin position and velocity including rotational contribution (world frame)
+                model_scale = 100.0
+                r_body = (center - self.obj_centers['Body']) * model_scale
+                omega_world = R @ self.angular_velocity
+                r_world = R @ r_body
+                relative_fin_vel = self.missile_vel + np.cross(omega_world, r_world)
+
+                # Incoming flow direction (air relative to surface) is opposite of fin velocity
+                speed_fin = np.linalg.norm(relative_fin_vel) + 1e-9
+                flow_dir = -relative_fin_vel / speed_fin
+
+                # Surface normal: convert to world and normalize
+                normal_world = R @ normal
+                normal_world = normal_world / (np.linalg.norm(normal_world) + 1e-9)
+
+                # Angle between surface normal and incoming flow
+                cos_ang = np.clip(np.dot(normal_world, flow_dir), -1.0, 1.0)
+                aoa = np.arccos(cos_ang) - np.pi / 2.0
+                if self.debug_enabled:
+                    print(f"Canard {obj_name}: aoa={aoa:.6f}, cos={cos_ang:.6f}")
+
+                # calculate lift (unpack first return element)
+                lift, = self.calculate_lift(aoa, speed)
+                force_magnitude = lift
+
+                # Force vector in world coords
+                force_vector_world = normal_world * force_magnitude
+
+                # Accumulate forces and moments (moments in world frame)
+                force_vectors += force_vector_world
+                moments_world += np.cross(r_world, force_vector_world)
+
+                self.fin_forces[i] = force_magnitude
+                    
+
+        # Convert torque (moments) to angular acceleration using principal moments of inertia
+        # Moments currently in world coords; convert to body coords before dividing by inertia
+        inertia = np.array([
+            self.moment_of_inertia_long,
+            self.moment_of_inertia_trns,
+            self.moment_of_inertia_trns
+        ], dtype=float)
+
+        # Avoid division by zero
+        inertia = np.where(np.abs(inertia) < 1e-12, 1e-12, inertia)
+
+        # Convert moments to body axes and compute angular acceleration (rad/s^2)
+        moments_body = R.T @ moments_world
+        angular_accel = moments_body / inertia
+
+        # Convert accumulated forces (world frame) to acceleration (a = F/m)
+        aero_accel = force_vectors / max(self.missile_mass, 1e-9)
+
+        return np.array(aero_accel), np.array(angular_accel)
     
     def update_physics(self):
         """Update simulation physics"""
@@ -599,7 +524,8 @@ class MissileSimulation:
             # Thrust
             if self.missile_time < self.missile_fuel:
                 forward, _, _ = self.get_body_axes()
-                thrust_accel = forward * self.missile_thrust
+                # Convert thrust (N) to acceleration (m/s^2) using mass
+                thrust_accel = forward * (self.missile_thrust / max(self.missile_mass, 1e-9))
                 if speed > 50.0:
                     angular_accel[2] += np.random.normal(0, 0.005)
             else:
@@ -728,7 +654,7 @@ class MissileSimulation:
             return
         
         model_scale = 100.0
-        force_scale = 2.0  # Scale forces for visibility
+        force_scale = 10.0  # Scale forces for visibility
         
         glPushMatrix()
         glTranslatef(self.missile_pos[0], self.missile_pos[1], self.missile_pos[2])
