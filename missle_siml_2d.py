@@ -1,5 +1,5 @@
-import sys
-import math
+import sys, random
+from math import *
 
 import pygame
 from pygame.locals import *
@@ -14,7 +14,7 @@ from numpy import array as vec
 SCREEN_WIDTH  = 800
 SCREEN_HEIGHT = 600
 SCREEN_SIZE   = vec([SCREEN_WIDTH, SCREEN_HEIGHT])
-FPS           = 120
+FPS           = 60
 
 BLACK = (0, 0, 0)
 
@@ -34,7 +34,7 @@ GRAVITY = vec([0.0, -9.81])  # world Y up (subtracted in update => same effect a
 
 def dist(p):
     """Euclidean length of a 2D vector."""
-    return math.sqrt(p[0] ** 2 + p[1] ** 2)
+    return sqrt(p[0] ** 2 + p[1] ** 2)
 
 
 def rotate_point(p, angle):
@@ -44,14 +44,21 @@ def rotate_point(p, angle):
     so that behavior remains identical.
     """
     length = dist(p)
-    base_angle = math.atan2(p[1], p[0])
-    return vec([math.sin(base_angle + angle), math.cos(base_angle + angle)]) * length
+    base_angle = atan2(p[1], p[0])
+    return vec([sin(base_angle + angle), cos(base_angle + angle)]) * length
 
 
 def normalize_angle(angle):
     """Normalize angle to [-pi, pi]."""
-    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+    return (angle + pi) % (2.0 * pi) - pi
 
+def norm(v):
+    return v / dist(v)
+
+def moment_about_center(R, theta, F):
+    rx = R * cos(theta)
+    ry = R * sin(theta)
+    return rx * F[1] - ry * F[0]  # scalar moment out of plane
 
 def calculate_lift(aoa, vel):
     """
@@ -63,15 +70,15 @@ def calculate_lift(aoa, vel):
     aoa_rel = normalize_angle(aoa)
 
     # 2) Effective AoA in [-pi/2, pi/2]
-    aoa_eff = (aoa_rel + 0.5 * math.pi) % math.pi - 0.5 * math.pi  # [-pi/2, +pi/2]
+    aoa_eff = (aoa_rel + 0.5 * pi) % pi - 0.5 * pi  # [-pi/2, +pi/2]
 
     V = dist(vel)
 
     # Parameters (unchanged)
     CL_alpha    = 5.5
-    alpha_stall = math.radians(15.0)
-    alpha_max   = math.radians(30.0)
-    k_lift      = 0.1
+    alpha_stall = radians(15.0)
+    alpha_max   = radians(30.0)
+    k_lift      = 0.03
 
     abs_a = abs(aoa_eff)
 
@@ -82,10 +89,10 @@ def calculate_lift(aoa, vel):
         t = (abs_a - alpha_stall) / (alpha_max - alpha_stall)
         t = max(0.0, min(1.0, t))
         CL_stall = CL_alpha * alpha_stall
-        CL = math.copysign((1.0 - t) * CL_stall, aoa_eff)
+        CL = copysign((1.0 - t) * CL_stall, aoa_eff)
 
     # 4) Optional sign flip depending on flow (kept commented out)
-    # sign_flow = 1.0 if math.cos(aoa_rel) >= 0.0 else -1.0
+    # sign_flow = 1.0 if cos(aoa_rel) >= 0.0 else -1.0
     # CL *= sign_flow
 
     return k_lift * CL * V * V
@@ -98,7 +105,7 @@ def calculate_lift(aoa, vel):
 class Target:
     def __init__(self, position):
         self.pos = vec(position)
-        self.vel = vec([0.0, 0.0])
+        self.vel = vec([1400/3.6, 0.0])
 
     def draw(self):
         pygame.draw.circle(
@@ -107,6 +114,11 @@ class Target:
             cam.world_to_screen(self.pos),
             10
         )
+    
+    def update(self, dt, t):
+        #self.vel += vec([cos(t)*30, 0])
+        self.pos += self.vel * dt
+
 
 # ==================================================================================
 # Camera
@@ -192,6 +204,19 @@ class Camera:
 # Missile simulation
 # ==================================================================================
 
+class Particle:
+    def __init__(self, pos, vel):
+        self.pos = pos
+        self.vel = vel
+        self.life = 5.0
+    
+    def update(self, dt):
+        self.life -= dt
+        if self.life < 0: return False
+        self.vel *= 0.99
+        self.pos += self.vel * dt
+        return True
+
 class MissileSimulation:
     def __init__(self):
         self.pos   = vec([0.0, 0.0])
@@ -202,7 +227,7 @@ class MissileSimulation:
         self.max_thrust = 25000.0
         self.fuel_time  = 3.0
 
-        self.angle     = math.pi / 2
+        self.angle     = pi / 2
         self.angle_vel = 0.0
         self.moment    = 0.0
         self.inertia   = 65.0
@@ -210,8 +235,11 @@ class MissileSimulation:
         self.canard_angle = 0.0
         self.canard_force = 5.0
         self.fin_force    = 5.0
+        self.g = 0.0
 
         self.debug_force = True
+
+        self.particles = []
 
     # ------------------------------------------------------------------ drawing
 
@@ -250,7 +278,7 @@ class MissileSimulation:
         canard_local     = self._build_canard_local()
         canard_world     = [
             rotate_point(
-                rotate_point(p, self.canard_angle + math.pi / 2.0) + canard_pos_local,
+                rotate_point(p, self.canard_angle + pi / 2.0) + canard_pos_local,
                 self.angle
             ) + self.pos
             for p in canard_local
@@ -270,6 +298,9 @@ class MissileSimulation:
             cam.world_to_screen(canard_world[1]),
             3
         )
+
+        for particle in self.particles:
+            screen.set_at(cam.world_to_screen(particle.pos), (255, 255, 255))
 
         # Debug forces
         if self.debug_force:
@@ -298,7 +329,7 @@ class MissileSimulation:
 
             # Velocity vector
             start_vel = self.pos
-            end_vel   = start_vel + self.vel * 0.1
+            end_vel   = start_vel + self.vel * 0.001
             pygame.draw.line(
                 screen, (128, 128, 128),
                 cam.world_to_screen(start_vel),
@@ -317,12 +348,17 @@ class MissileSimulation:
 
         # Thrust
         if self.fuel_time != 0:
-            thrust_dir = vec([math.cos(-self.angle), math.sin(-self.angle)])
+            for i in range(5):
+                angle = self.angle - pi/2.0 + (random.random()-0.5)*0.3
+                vel = vec([sin(angle), cos(angle)]) * 5 + random.random()
+                self.particles.append(Particle(vec(self.pos), vel+self.vel))
+
+            thrust_dir = vec([cos(-self.angle), sin(-self.angle)])
             self.accel += thrust_dir * self.max_thrust / self.mass
 
     def _apply_fin_forces(self):
         # AoA for fixed tail fins
-        aoa = math.atan2(self.vel[1], self.vel[0]) + self.angle
+        aoa = atan2(self.vel[1], self.vel[0]) + self.angle
         aoa = normalize_angle(aoa)
 
         fin_pos_local = vec([0.0, -1.0])
@@ -332,8 +368,8 @@ class MissileSimulation:
 
         # Acceleration from fin lift
         lift_dir = vec([
-            math.cos(-self.angle + math.pi / 2.0),
-            math.sin(-self.angle + math.pi / 2.0),
+            cos(-self.angle + pi / 2.0),
+            sin(-self.angle + pi / 2.0),
         ])
         self.accel -= lift_dir * self.fin_force / self.mass
 
@@ -342,7 +378,7 @@ class MissileSimulation:
 
     def _apply_canard_forces(self):
         # AoA for canard
-        aoa = math.atan2(self.vel[1], self.vel[0]) + (self.angle - self.canard_angle)
+        aoa = atan2(self.vel[1], self.vel[0]) + (self.angle - self.canard_angle)
         aoa = normalize_angle(aoa)
 
         canard_pos_local = vec([0.0, -1.0])
@@ -352,17 +388,18 @@ class MissileSimulation:
 
         # Acceleration from canard lift (same direction as fin lift)
         lift_dir = vec([
-            math.cos(-self.angle + math.pi / 2.0),
-            math.sin(-self.angle + math.pi / 2.0),
+            cos(-self.angle + pi / 2.0),
+            sin(-self.angle + pi / 2.0),
         ])
         self.accel -= lift_dir * self.canard_force / self.mass
 
         # Moment from canard
-        self.moment += self.canard_force * dist(canard_pos_local) * math.cos(self.canard_angle)
+        self.moment += self.canard_force * dist(canard_pos_local) * cos(self.canard_angle)
 
     def _integrate_linear(self, dt):
         self.vel   += self.accel * dt
         self.pos   += self.vel * dt
+        self.g = dist(self.accel/9.81)
         self.accel  = vec([0.0, 0.0])
 
     def _integrate_angular(self, dt):
@@ -371,25 +408,44 @@ class MissileSimulation:
         self.angle     += self.angle_vel * dt
         self.moment     = 0.0
 
-    def _guidance_equation(self, target):
-        # Calculate angle to target
+    def _guidance_equation(self, target, debug_surface):
         target_vec = target.pos - self.pos
-        target_angle = math.atan2(target_vec[1], target_vec[0])
+        D = dist(target_vec)
+        T = D/(dist(self.vel)+1)
+
+        new_target_pos = target.pos + target.vel * T
+        target_vec = new_target_pos - self.pos
+
+        pygame.draw.line(debug_surface, (0, 255, 0), cam.world_to_screen(target.pos), cam.world_to_screen(target.pos+target_vec))
+        pygame.draw.line(debug_surface, (255, 0, 0), cam.world_to_screen(self.pos), cam.world_to_screen(target_vec+self.pos), 3)
+        target_angle = atan2(target_vec[0], target_vec[1])
+        
+        text = f"g: {round(self.g, 1)}\nspeed: {round(dist(self.vel)*3.6)} km/h"
+        text_surface = debug_font.render(text, True, (255, 255, 255))
+
+
+        debug_surface.blit(text_surface, (10, 10))
 
         # Calculate angle error
-        angle_error = normalize_angle(target_angle - (self.angle+math.pi/2.0))
+        angle_error = normalize_angle(target_angle - (self.angle+pi/2.0))
         self.canard_angle = -min(max(angle_error, -0.1), 0.1)
         print(angle_error)
     
-    def update(self, dt):
+    def update(self, dt, debug_surface):
         # fuel countdown
         self.fuel_time -= dt
-        self._guidance_equation(target)
+        self._guidance_equation(target, debug_surface)
         self._apply_thrust_and_gravity()
         self._apply_fin_forces()
         self._apply_canard_forces()
         self._integrate_linear(dt)
         self._integrate_angular(dt)
+        
+        while 200 < len(self.particles):
+            self.particles.pop(0)
+
+        for particle in self.particles:
+            particle.update(dt)
 
 
 # ==================================================================================
@@ -419,7 +475,7 @@ def draw_grid(screen, cam, spacing=1.0, color=(60, 60, 60), axis_color=(200, 60,
     ymax += pad
 
     # Vertical lines
-    start_x = math.floor(xmin / spacing) * spacing
+    start_x = floor(xmin / spacing) * spacing
     x = start_x
     while x <= xmax:
         p1 = cam.world_to_screen(vec([x, ymin]))
@@ -429,7 +485,7 @@ def draw_grid(screen, cam, spacing=1.0, color=(60, 60, 60), axis_color=(200, 60,
         x += spacing
 
     # Horizontal lines
-    start_y = math.floor(ymin / spacing) * spacing
+    start_y = floor(ymin / spacing) * spacing
     y = start_y
     while y <= ymax:
         p1 = cam.world_to_screen(vec([xmin, y]))
@@ -444,9 +500,13 @@ def draw_grid(screen, cam, spacing=1.0, color=(60, 60, 60), axis_color=(200, 60,
 # ==================================================================================
 
 pygame.init()
+pygame.font.init()
 
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+debug_surface = pygame.surface.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption("Missile Simulation 2D")
+
+debug_font = pygame.font.SysFont('Arial', 11, bold=True)
 
 clock  = pygame.time.Clock()
 cam    = Camera()
@@ -458,6 +518,7 @@ t = 0.0
 
 while running:
     dt = clock.tick(FPS) / 1000.0
+    dt = 1/FPS
     t += dt
 
     for event in pygame.event.get():
@@ -485,14 +546,16 @@ while running:
         cam.dragging = False
 
     keys = pygame.key.get_pressed()
-
-    missle.update(dt)
+    debug_surface.fill(BLACK)
+    target.update(dt, t)
+    missle.update(dt, debug_surface)
     cam.center = missle.pos
 
     screen.fill(BLACK)
+    screen.blit(debug_surface, (0, 0))
 
     # Optionally draw grid:
-    # draw_grid(screen, cam, spacing=1.0 / (cam.zoom - 1 * 10 + 1))
+    draw_grid(screen, cam, spacing=50)
 
     missle.draw()
     target.draw()
