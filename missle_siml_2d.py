@@ -55,10 +55,11 @@ def normalize_angle(angle):
 def norm(v):
     return v / dist(v)
 
-def moment_about_center(R, theta, F):
-    rx = R * cos(theta)
-    ry = R * sin(theta)
-    return rx * F[1] - ry * F[0]  # scalar moment out of plane
+def moment_about_center(O, F):
+    Ox, Oy = O
+    Fx, Fy = F
+    Mz = Ox * Fy - Oy * Fx
+    return Mz
 
 def calculate_lift(aoa, vel):
     """
@@ -101,11 +102,60 @@ def calculate_lift(aoa, vel):
 # ==================================================================================
 # Tarrget
 # ==================================================================================
+class Wing:
+    def __init__(self, surface, cl_a, cd0, ar=6.0, e=0.75, rho=1.225):
+        self.area = surface # S [m^2]
+        self.cl_alpha = cl_a # dCL/d(alpha) [1/rad]
+        self.cd0 = cd0 # parasitic drag coefficient
+        self.aspect_ratio = ar # AR, used for induced drag
+        self.e = e # Oswald efficiency factor
+        self.rho = rho # air density [kg/m^3]
+        self.cl_max = 4.25
+        self.cd_alpha = 0.175
+
+canard = Wing(0.012, 4.0, 0.01, 2, 0.7)
+fin = Wing(0.025, 4.5, 0.015, 2.5, 0.8)
+
+def compute_lift_drag(vel, wing_angle, wing):
+    vx, vy = vel
+    V = dist(vel)
+    if V < 1e-6:
+        return vec([0.0, 0.0]), vec([0.0, 0.0])
+
+    flow_angle = atan2(vy, vx)
+    alpha = wing_angle - flow_angle  # [rad]
+
+    # wrap AoA to [-pi, pi] if needed
+    while alpha > 3.14159265:
+        alpha -= 2.0 * 3.14159265
+    while alpha < -3.14159265:
+        alpha += 2.0 * 3.14159265
+
+    q = 0.5 * wing.rho * V * V
+
+    # Nonlinear coefficients
+    # cl roughly ~ sin(2α): 0 at 0°, sign changes with α, max at 45°
+    cl = wing.cl_max * sin(2.0 * alpha)
+
+    # drag: base + induced + extra with AoA
+    cd = wing.cd0 + wing.cd_alpha * (sin(alpha) ** 2)
+
+    L = q * wing.area * cl
+    D = q * wing.area * cd
+
+    v_hat = vel / V
+
+    drag_vec = -D * v_hat
+    lift_vec = vec([L * -v_hat[1], L * v_hat[0]])
+
+    return lift_vec, drag_vec
+
+
 
 class Target:
     def __init__(self, position):
         self.pos = vec(position)
-        self.vel = vec([1400/3.6, 0.0])
+        self.vel = vec([700/3.6, 0.0])
 
     def draw(self):
         pygame.draw.circle(
@@ -139,24 +189,24 @@ class Camera:
 
     def world_to_screen(self, p):
         """Convert world position (2D) -> screen position (2D)."""
-        p = vec(p)
+        p = vec(p) * vec([1, -1])
         return (p - self.center) * self.zoom + SCREEN_SIZE / 2.0
 
     def screen_to_world(self, s):
         """Convert screen position (2D) -> world position (2D)."""
-        s = vec(s)
+        s = vec(s) * vec([1, -1])
         return (s - SCREEN_SIZE / 2.0) / self.zoom + self.center
 
     def world_to_cam_rect(self, rect):
         """Convert a world rect [x,y,w,h] to a pygame.Rect on screen."""
         x, y, w, h = rect
-        screen_pos = self.world_to_screen(vec([x, y]))
+        screen_pos = self.world_to_screen(vec([x, y]) * vec([1, -1]))
         return pygame.Rect(screen_pos[0], screen_pos[1], w * self.zoom, h * self.zoom)
 
     def world_to_cam_poly(self, poly):
         """Convert a list of world vertices to screen vertices in-place."""
         for i, vert in enumerate(poly):
-            poly[i] = (vert - self.center) * self.zoom + SCREEN_SIZE / 2.0
+            poly[i] = (vert * vec([1, -1]) - self.center) * self.zoom + SCREEN_SIZE / 2.0
         return poly
 
     # ------------------------------------------------------------------ dragging
@@ -305,27 +355,28 @@ class MissileSimulation:
         # Debug forces
         if self.debug_force:
             # Canard lift vector
-            canard_pos    = canard_pos_local
-            start_canard  = rotate_point(canard_pos, self.angle) + self.pos
-            end_canard    = start_canard + rotate_point(vec([-self.canard_force, 0.0]),
-                                                        self.angle - self.canard_angle)*0.0001
-            pygame.draw.line(
-                screen, (128, 128, 128),
-                cam.world_to_screen(start_canard),
-                cam.world_to_screen(end_canard),
-                3,
-            )
+            if False:
+                canard_pos    = canard_pos_local
+                start_canard  = rotate_point(canard_pos, self.angle) + self.pos
+                end_canard    = start_canard + rotate_point(vec([-self.canard_force, 0.0]),
+                                                            self.angle - self.canard_angle)*0.0001
+                pygame.draw.line(
+                    screen, (128, 128, 128),
+                    cam.world_to_screen(start_canard),
+                    cam.world_to_screen(end_canard),
+                    3,
+                )
 
-            # Fin lift vector
-            fin_pos       = fin_pos_local
-            start_fin     = rotate_point(fin_pos, self.angle) + self.pos
-            end_fin       = start_fin + rotate_point(vec([-self.fin_force, 0.0]), self.angle)*0.0001
-            pygame.draw.line(
-                screen, (128, 128, 128),
-                cam.world_to_screen(start_fin),
-                cam.world_to_screen(end_fin),
-                3,
-            )
+                # Fin lift vector
+                fin_pos       = fin_pos_local
+                start_fin     = rotate_point(fin_pos, self.angle) + self.pos
+                end_fin       = start_fin + rotate_point(vec([-self.fin_force, 0.0]), self.angle)*0.0001
+                pygame.draw.line(
+                    screen, (128, 128, 128),
+                    cam.world_to_screen(start_fin),
+                    cam.world_to_screen(end_fin),
+                    3,
+                )
 
             # Velocity vector
             start_vel = self.pos
@@ -357,44 +408,34 @@ class MissileSimulation:
             self.accel += thrust_dir * self.max_thrust / self.mass
 
     def _apply_fin_forces(self):
-        # AoA for fixed tail fins
-        aoa = atan2(self.vel[1], self.vel[0]) + self.angle
-        aoa = normalize_angle(aoa)
-
+        lift, drag = compute_lift_drag(self.vel, self.angle-pi, canard)
+        
         fin_pos_local = vec([0.0, -1.0])
 
         # Lift magnitude (unchanged formula)
-        self.fin_force = calculate_lift(aoa, self.vel) * 1.3
+        self.fin_force = lift
 
-        # Acceleration from fin lift
-        lift_dir = vec([
-            cos(-self.angle + pi / 2.0),
-            sin(-self.angle + pi / 2.0),
-        ])
-        self.accel -= lift_dir * self.fin_force / self.mass
+        # Acceleration from canard lift (same direction as fin lift)
+        
+        self.accel -= self.fin_force / self.mass*0
 
-        # Moment from fin
-        self.moment -= self.fin_force * dist(fin_pos_local)
+        # Moment from canard
+        offset = rotate_point(fin_pos_local, self.angle)
+        self.moment -= moment_about_center(offset, self.fin_force)
 
     def _apply_canard_forces(self):
-        # AoA for canard
-        aoa = atan2(self.vel[1], self.vel[0]) + (self.angle - self.canard_angle)
-        aoa = normalize_angle(aoa)
-
+        lift, drag = compute_lift_drag(self.vel, normalize_angle(self.angle+self.canard_angle-pi), canard)
+        
         canard_pos_local = vec([0.0, -1.0])
 
         # Lift magnitude (unchanged formula)
-        self.canard_force = calculate_lift(aoa, self.vel)
+        self.canard_force = lift
 
-        # Acceleration from canard lift (same direction as fin lift)
-        lift_dir = vec([
-            cos(-self.angle + pi / 2.0),
-            sin(-self.angle + pi / 2.0),
-        ])
-        self.accel -= lift_dir * self.canard_force / self.mass
+        self.accel + self.canard_force / self.mass*0
 
         # Moment from canard
-        self.moment += self.canard_force * dist(canard_pos_local) * cos(self.canard_angle)
+        offset = rotate_point(canard_pos_local, self.angle)
+        self.moment += moment_about_center(offset, self.canard_force)
 
     def _integrate_linear(self, dt):
         self.vel   += self.accel * dt
@@ -428,8 +469,7 @@ class MissileSimulation:
 
         # Calculate angle error
         angle_error = normalize_angle(target_angle - (self.angle+pi/2.0))
-        self.canard_angle = -min(max(angle_error, -0.1), 0.1)
-        print(angle_error)
+        #self.canard_angle = -min(max(angle_error, -0.1), 0.1) * 0
     
     def update(self, dt, debug_surface):
         # fuel countdown
@@ -516,51 +556,56 @@ running = True
 
 t = 0.0
 
-while running:
-    dt = clock.tick(FPS) / 1000.0
-    dt = 1/FPS
-    t += dt
+if __name__ == "__main__":
+    while running:
+        dt = clock.tick(FPS) / 1000.0
+        dt = 1/FPS
+        t += dt
 
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
 
-        # right mouse button drag
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 3:  # right click
-                cam.start_drag(event.pos)
+            # right mouse button drag
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 3:  # right click
+                    cam.start_drag(event.pos)
 
-        if event.type == pygame.MOUSEBUTTONUP:
-            if event.button == 3:
-                cam.stop_drag()
+            if event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 3:
+                    cam.stop_drag()
 
-        # zoom from mouse cursor
-        if event.type == pygame.MOUSEWHEEL:
-            print(event.precise_y)
-            cam.zoom_at(pygame.mouse.get_pos(), event.precise_y * 0.1 + 1)
+            # zoom from mouse cursor
+            if event.type == pygame.MOUSEWHEEL:
+                print(event.precise_y)
+                cam.zoom_at(pygame.mouse.get_pos(), event.precise_y * 0.1 + 1)
 
-    # update dragging state
-    if cam.dragging and pygame.mouse.get_pressed()[2]:
-        cam.update_drag(pygame.mouse.get_pos())
-    else:
-        cam.dragging = False
+        # update dragging state
+        if cam.dragging and pygame.mouse.get_pressed()[2]:
+            cam.update_drag(pygame.mouse.get_pos())
+        else:
+            cam.dragging = False
 
-    keys = pygame.key.get_pressed()
-    debug_surface.fill(BLACK)
-    target.update(dt, t)
-    missle.update(dt, debug_surface)
-    cam.center = missle.pos
+        keys = pygame.key.get_pressed()
+        if keys[K_LEFT]:
+            missle.canard_angle += dt*0.1
+        if keys[K_RIGHT]:
+            missle.canard_angle -= dt*0.1
+        debug_surface.fill(BLACK)
+        target.update(dt, t)
+        missle.update(dt, debug_surface)
+        cam.center = missle.pos
 
-    screen.fill(BLACK)
-    screen.blit(debug_surface, (0, 0))
+        screen.fill(BLACK)
+        screen.blit(debug_surface, (0, 0))
 
-    # Optionally draw grid:
-    draw_grid(screen, cam, spacing=50)
+        # Optionally draw grid:
+        draw_grid(screen, cam, spacing=50)
 
-    missle.draw()
-    target.draw()
+        missle.draw()
+        target.draw()
 
-    pygame.display.flip()
+        pygame.display.flip()
 
-pygame.quit()
-sys.exit()
+    pygame.quit()
+    sys.exit()

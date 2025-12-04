@@ -6,12 +6,16 @@ Vector2 = Tuple[float, float]
 
 @dataclass
 class Wing:
-    area: float              # S [m^2]
-    cl_alpha: float          # dCL/d(alpha) [1/rad]
-    cd0: float               # parasitic drag coefficient
-    aspect_ratio: float = 6  # AR, used for induced drag
-    e: float = 0.8           # Oswald efficiency factor
-    rho: float = 1.225       # air density [kg/m^3]
+    def __init__(self, surface, cl_a, cd0, ar=6.0, e=0.75, rho=1.225):
+        self.area = surface # S [m^2]
+        self.cl_alpha = cl_a # dCL/d(alpha) [1/rad]
+        self.cd0 = cd0 # parasitic drag coefficient
+        self.aspect_ratio = ar # AR, used for induced drag
+        self.e = e # Oswald efficiency factor
+        self.rho: rho # air density [kg/m^3]
+
+canard = Wing(0.012, 4.0, 0.01, 2, 0.7)
+fin = Wing(0.025, 4.5, 0.015, 2.5, 0.8)
 
 def compute_lift_drag(
     vel: Vector2,
